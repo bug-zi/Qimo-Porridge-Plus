@@ -1,4 +1,4 @@
-"""跨 router 共享的底层依赖：SQLite 连接、归档表辅助。
+"""跨 router 共享的底层依赖：SQLite 连接、归档表辅助、当前用户（owner）。
 
 路由模块只从这里 import，main.py 也从这里取 get_connection，
 保持 main → routers 单向依赖，避免循环导入。
@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
+from fastapi import HTTPException, Request
 from pydantic import BaseModel
 
 DATA_DIRECTORY = Path(__file__).resolve().parent.parent.parent / "data"
@@ -25,6 +26,18 @@ def get_connection() -> sqlite3.Connection:
     connection = sqlite3.connect(DATABASE_PATH, timeout=30)
     connection.row_factory = sqlite3.Row
     return connection
+
+
+def current_owner_id(request: Request) -> str:
+    """从 AuthMiddleware 注入的 request.state 取当前用户 id（阶段2 owner 过滤的统一入口）。
+
+    白名单路径（auth/health）不会走到这里；中间件已保证非白名单 /api/* 请求
+    必然携带 user_id，此处的 401 只是防御性兜底。
+    """
+    user_id = getattr(request.state, "user_id", None)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="未登录")
+    return str(user_id)
 
 
 class ArchiveItemResponse(BaseModel):

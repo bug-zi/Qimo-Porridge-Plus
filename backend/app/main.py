@@ -36,6 +36,7 @@ from .study_service import (
     run_glossary_refresh_job,
     sync_course_knowledge,
 )
+from .tenancy import claim_legacy_courses, ensure_owner_columns
 
 
 def _maintain_plan_job(course_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -95,6 +96,7 @@ def initialize_database() -> None:
             """
             CREATE TABLE IF NOT EXISTS courses (
                 id TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL DEFAULT '',
                 name TEXT NOT NULL,
                 exam_date TEXT NOT NULL,
                 target_score INTEGER NOT NULL,
@@ -116,6 +118,7 @@ def initialize_database() -> None:
 
             CREATE TABLE IF NOT EXISTS archived_items (
                 id TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL DEFAULT '',
                 item_type TEXT NOT NULL,
                 entity_id TEXT NOT NULL,
                 title TEXT NOT NULL,
@@ -194,6 +197,9 @@ def initialize_database() -> None:
 async def lifespan(_: FastAPI):
     initialize_database()
     initialize_auth_database()
+    # 阶段2多租户：老库 ALTER 补 owner_id 列，存量无主数据归属首个注册用户
+    ensure_owner_columns()
+    claim_legacy_courses()
     initialize_knowledge_database()
     ensure_local_ollama_service()
     initialize_agent_database()
