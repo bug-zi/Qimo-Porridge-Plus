@@ -10692,3 +10692,146 @@ code .formula-symbol sup {
 .glossary-term-card-section h4 { margin: 12px 0 6px; font-size: 13px; color: var(--primary-strong); }
 
 .glossary-term-card-section ul { margin: 0; padding-left: 18px; font-size: 12.5px; line-height: 1.6; }
+
+/* ------------------------------ 登录页（阶段1） ------------------------------ */
+
+.login-page {
+  position: fixed;
+  z-index: 60;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: var(--workspace-background) center / cover no-repeat fixed;
+}
+
+.login-page::before {
+  position: absolute;
+  inset: 0;
+  content: '';
+  background: var(--workspace-wash);
+}
+
+.login-card {
+  position: relative;
+  display: grid;
+  width: min(100%, 380px);
+  padding: 28px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  backdrop-filter: var(--panel-filter);
+}
+
+.login-brand {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.login-brand h1 {
+  margin: 0;
+  color: var(--text);
+  font-size: 22px;
+}
+
+.login-brand p {
+  margin: 3px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.login-form {
+  display: grid;
+  gap: 12px;
+}
+
+.login-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.login-form input {
+  height: 40px;
+  padding: 0 12px;
+  min-width: 0;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  outline: none;
+  font-size: 14px;
+}
+
+.login-form input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+.login-submit {
+  display: inline-flex;
+  gap: 7px;
+  align-items: center;
+  justify-content: center;
+  height: 42px;
+  margin-top: 4px;
+  color: #fff;
+  border: none;
+  border-radius: 9px;
+  background: var(--primary);
+  font-size: 14px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.login-submit:hover:not(:disabled) {
+  background: var(--primary-strong);
+}
+
+.login-submit:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.login-switch {
+  margin-top: 16px;
+  padding: 0;
+  color: var(--primary);
+  border: none;
+  background: transparent;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.login-switch:hover {
+  color: var(--primary-strong);
+  text-decoration: underline;
+}
+
+.spin {
+  animation: login-spin 0.9s linear infinite;
+}
+
+@keyframes login-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.nav-user {
+  overflow: hidden;
+  max-width: 100%;
+  padding: 2px 8px;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+  text-align: center;
+  font-size: 10.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}

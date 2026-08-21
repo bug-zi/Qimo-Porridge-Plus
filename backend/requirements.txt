@@ -7,6 +7,9 @@ python-dotenv>=1.0
 python-multipart>=0.0.20
 # 认证（阶段1启用）：密码哈希 + JWT + 凭据加密
 passlib[bcrypt]>=1.7
+# passlib 1.7 与 bcrypt>=4.1 不兼容（缺 __about__），锁定 4.0.x
+bcrypt<4.1
+email-validator>=2.0
 PyJWT>=2.8
 cryptography>=42.0
 # 扫描版 PDF / 图片本地 OCR 级联（可选，缺失时自动跳过并提示安装）

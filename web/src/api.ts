@@ -1,3 +1,4 @@
+import { authFetch } from './auth'
 import type {
   AdjustmentProposal,
   AgentJob,
@@ -95,7 +96,7 @@ async function request<T>(path: string, init?: RequestInit, timeoutMs?: number):
   const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null
   let response: Response
   try {
-    response = await fetch(`${apiBaseUrl}${path}`, {
+    response = await authFetch(path, {
       headers: {
         'Content-Type': 'application/json; charset=utf-8',
         ...init?.headers,
@@ -344,7 +345,7 @@ export async function uploadCourseMaterials(courseId: string, files: FileList | 
   const encoder = new TextEncoder()
   const manifestBytes = encoder.encode(JSON.stringify(manifest))
   const headerBytes = encoder.encode(`${manifestBytes.byteLength}\n`)
-  const response = await fetch(`${apiBaseUrl}/courses/${encodeURIComponent(courseId)}/materials/upload-batch`, {
+  const response = await authFetch(`/courses/${encodeURIComponent(courseId)}/materials/upload-batch`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/octet-stream' },
     body: new Blob([headerBytes, manifestBytes, ...fileArray]),
@@ -476,7 +477,7 @@ export function updateCourseWorkspace(courseId: string, payload: {
  * 失败静默——这是最后兜底手段；正常链路由 updateCourseWorkspace + 失败提示负责。
  */
 export function flushCourseWorkspaceNote(courseId: string, note: string): void {
-  void fetch(`${apiBaseUrl}/courses/${encodeURIComponent(courseId)}/workspace`, {
+  void authFetch(`/courses/${encodeURIComponent(courseId)}/workspace`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json; charset=utf-8' },
     body: JSON.stringify({ note }),
@@ -610,8 +611,8 @@ export function streamCourseAgent(
   void (async () => {
     let response: Response
     try {
-      response = await fetch(
-        `${apiBaseUrl}/courses/${encodeURIComponent(courseId)}/agent/chat/stream`,
+      response = await authFetch(
+        `/courses/${encodeURIComponent(courseId)}/agent/chat/stream`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

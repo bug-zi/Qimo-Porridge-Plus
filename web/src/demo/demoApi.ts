@@ -358,6 +358,9 @@ function applyTaskStatusSideEffects(workspace: StudyWorkspace, taskId: string, n
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 const demoApi: ApiSurface = {
+  /* 演示模式无后端；apiBaseUrl 仅满足与 ../api.ts 同签名的类型约束 */
+  apiBaseUrl: '',
+
   /* ---------------- 课程 ---------------- */
 
   async listCourses() {

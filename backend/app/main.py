@@ -8,6 +8,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .agent_runtime import AgentJobWorker, initialize_agent_database
+from .auth_middleware import AuthMiddleware
+from .auth_service import initialize_auth_database
 from .external_source_service import process_external_source_job
 from .knowledge_service import (
     ensure_local_ollama_service,
@@ -15,6 +17,7 @@ from .knowledge_service import (
 )
 from .mcp_gateway import seed_mcp_presets
 from .routers import agent as agent_router
+from .routers import auth as auth_router
 from .routers import courses as courses_router
 from .routers import external_sources as external_sources_router
 from .routers import glossary as glossary_router
@@ -190,6 +193,7 @@ def initialize_database() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     initialize_database()
+    initialize_auth_database()
     initialize_knowledge_database()
     ensure_local_ollama_service()
     initialize_agent_database()
@@ -219,9 +223,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 白名单式认证：/api/* 默认拒绝，仅 auth 端点与健康检查放行（阶段1）
+app.add_middleware(AuthMiddleware)
+
 # 挂载顺序沿用拆分前 main.py 中路由的首次出现顺序；
 # 各模块内部保持原有相对顺序，URL 匹配行为与拆分前一致。
 app.include_router(system_router.router)
+app.include_router(auth_router.router)
 app.include_router(courses_router.router)
 app.include_router(strategy_router.router)
 app.include_router(materials_router.router)

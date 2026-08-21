@@ -10,6 +10,7 @@ import {
   FileArchive,
   FileText,
   Grid2X2,
+  LogOut,
   Network,
   Orbit,
   Plus,
@@ -31,6 +32,8 @@ import {
 type MainNavigationProps = {
   activeModule: LearningModule
   onModuleChange: (module: LearningModule) => void
+  onLogout?: () => void
+  userName?: string
 }
 
 type CoursePanelProps = {
@@ -74,7 +77,7 @@ function CourseGlyph({ course }: { course: Course }) {
   }
 }
 
-export function MainNavigation({ activeModule, onModuleChange }: MainNavigationProps) {
+export function MainNavigation({ activeModule, onModuleChange, onLogout, userName }: MainNavigationProps) {
   return (
     <aside className="main-navigation">
       <button className="brand-button" type="button" aria-label="返回课程总览" onClick={() => onModuleChange('overview')}>
@@ -101,6 +104,18 @@ export function MainNavigation({ activeModule, onModuleChange }: MainNavigationP
       </div>
 
       <div className="nav-bottom">
+        {userName && <span className="nav-user" title={userName}>{userName}</span>}
+        {onLogout && (
+          <button
+            className="nav-item"
+            type="button"
+            title="退出登录"
+            onClick={onLogout}
+          >
+            <LogOut size={20} />
+            <span>退出登录</span>
+          </button>
+        )}
         <button
           className={`nav-item ${activeModule === 'settings' ? 'is-active' : ''}`}
           type="button"

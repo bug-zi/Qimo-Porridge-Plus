@@ -34,7 +34,7 @@ import {
   isDemoMode,
 } from '../apiClient'
 import { BilibiliCredentialDialog } from './BilibiliCredentialDialog'
-import { apiBaseUrl } from '../api'
+import { authFetch } from '../auth'
 import type {
   BilibiliCredentialStatus,
   EmbeddingProfile,
@@ -217,7 +217,7 @@ async function requestAvailableModels(profile: ModelProfile) {
       available_models: ['gpt-5.4', 'deepseek-v4', 'glm-5.1'],
     } satisfies ConnectionResult
   }
-  const response = await fetch(`${apiBaseUrl}/model-profiles/test`, {
+  const response = await authFetch('/model-profiles/test', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

@@ -72,6 +72,9 @@ import { SelectionToNoteToolbar } from './components/SelectionToNoteToolbar'
 import { TopbarCourseTimer } from './components/TopbarCourseTimer'
 import { CourseTimerProvider } from './hooks/useCourseTimer'
 import { GlossaryProvider } from './hooks/useGlossary'
+import { AUTH_EXPIRED_EVENT, getStoredUser, hasSession, logout, type AuthUser } from './auth'
+import { LoginPage } from './components/LoginPage'
+import { isDemoMode } from './apiClient'
 import { useSpecularButtons } from './hooks/useSpecularButtons'
 import { buildCourseTimeline, summarizeTimeline, COURSE_CATEGORY_TABS, type CourseTimelineCategory } from './utils/courseTimeline'
 import type {
@@ -434,6 +437,28 @@ function createLocalCourseWorkspace(course: Course): StudyWorkspace {
 }
 
 function App() {
+  // 认证门（阶段1）：演示模式跳过；有会话才挂工作台，refresh 失效时回到登录页
+  const [authUser, setAuthUser] = useState<AuthUser | null>(() => (isDemoMode ? { id: 'demo', email: '', displayName: '演示', role: 'user' } : getStoredUser()))
+  const isAuthed = isDemoMode || (hasSession() && authUser !== null)
+
+  useEffect(() => {
+    if (isDemoMode) return
+    function handleAuthExpired() {
+      setAuthUser(null)
+    }
+    window.addEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired)
+    return () => window.removeEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired)
+  }, [])
+
+  async function handleLogout() {
+    await logout()
+    setAuthUser(null)
+    setWorkspace(null)
+    setCourses([])
+    setCourseWorkspaces({})
+    setActiveCourseId('')
+  }
+
   const [workspace, setWorkspace] = useState<StudyWorkspace | null>(null)
   const [courses, setCourses] = useState<Course[]>([])
   const [archiveItems, setArchiveItems] = useState<ArchiveItem[]>([])
@@ -686,6 +711,7 @@ function App() {
   }, [isCourseMenuOpen])
 
   useEffect(() => {
+    if (!isAuthed) return
     let isActive = true
 
     async function loadWorkspace() {
@@ -721,7 +747,7 @@ function App() {
     return () => {
       isActive = false
     }
-  }, [])
+  }, [isAuthed])
 
   const activeCourse = courses.find((course) => course.id === activeCourseId)
     ?? (workspace?.course.id === activeCourseId ? workspace.course : undefined)
@@ -1456,6 +1482,10 @@ function App() {
     }
   }
 
+  if (!isAuthed) {
+    return <LoginPage onAuthed={() => setAuthUser(getStoredUser())} />
+  }
+
   if (loadError) {
     return (
       <div className="app-shell boot-shell">
@@ -1498,6 +1528,8 @@ function App() {
       <MainNavigation
         activeModule={activeModule}
         onModuleChange={changeActiveModule}
+        userName={authUser?.displayName}
+        onLogout={isDemoMode ? undefined : handleLogout}
       />
 
       <main className="main-area">
