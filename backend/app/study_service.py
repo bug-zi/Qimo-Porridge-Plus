@@ -233,12 +233,20 @@ def _ensure_app_metadata_table(connection: sqlite3.Connection) -> None:
     )
 
 
-def get_user_profile_prompt() -> dict[str, str]:
+def _user_profile_metadata_key(owner_id: str) -> str:
+    """用户自画像按 owner 分键存储（阶段2多租户；空 owner 兼容旧全局键）。"""
+    normalized = (owner_id or "").strip()
+    if not normalized:
+        return USER_PROFILE_PROMPT_METADATA_KEY
+    return f"{USER_PROFILE_PROMPT_METADATA_KEY}:{normalized}"
+
+
+def get_user_profile_prompt(owner_id: str = "") -> dict[str, str]:
     with _metadata_connection() as connection:
         _ensure_app_metadata_table(connection)
         row = connection.execute(
             "SELECT value FROM app_metadata WHERE key = ?",
-            (USER_PROFILE_PROMPT_METADATA_KEY,),
+            (_user_profile_metadata_key(owner_id),),
         ).fetchone()
     if row is None:
         return {"content": "", "updatedAt": ""}
@@ -254,7 +262,7 @@ def get_user_profile_prompt() -> dict[str, str]:
     }
 
 
-def save_user_profile_prompt(content: str) -> dict[str, str]:
+def save_user_profile_prompt(content: str, owner_id: str = "") -> dict[str, str]:
     normalized = content.strip()
     if len(normalized) > USER_PROFILE_PROMPT_MAX_LENGTH:
         raise ValueError(f"用户自画像不能超过 {USER_PROFILE_PROMPT_MAX_LENGTH} 字")
@@ -266,7 +274,7 @@ def save_user_profile_prompt(content: str) -> dict[str, str]:
         _ensure_app_metadata_table(connection)
         connection.execute(
             "INSERT OR REPLACE INTO app_metadata (key, value) VALUES (?, ?)",
-            (USER_PROFILE_PROMPT_METADATA_KEY, json.dumps(payload, ensure_ascii=False)),
+            (_user_profile_metadata_key(owner_id), json.dumps(payload, ensure_ascii=False)),
         )
     return payload
 
@@ -5884,6 +5892,7 @@ def _build_agent_messages(
     context: dict[str, Any] | None,
     *,
     workspace: dict[str, Any] | None = None,
+    owner_id: str = "",
 ) -> dict[str, Any]:
     """构造 Tutor Agent 的 messages 列表，供流式 agent_chat_stream 使用。
 
@@ -5913,7 +5922,7 @@ def _build_agent_messages(
         "最终使用中文 Markdown 回答；有资料依据时保留[来源：文件名 · 位置]。"
     )
     messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-    user_profile_prompt = get_user_profile_prompt()["content"].strip()
+    user_profile_prompt = get_user_profile_prompt(owner_id)["content"].strip()
     if user_profile_prompt:
         messages.append(
             {
@@ -5977,6 +5986,7 @@ def agent_chat_stream(
     *,
     mode: str = "chat",
     context: dict[str, Any] | None = None,
+    owner_id: str = "",
 ):
     """流式版 Tutor Agent 对话，yield SSE 文本块。
 
@@ -5985,7 +5995,7 @@ def agent_chat_stream(
     run_tutor_agent_stream 抛异常时降级为一次性 RAG 回答，reply 仍经 done 整体回传
     （前端用 done.reply 覆盖此前流式草稿）。
     """
-    built = _build_agent_messages(course_id, message, mode, context)
+    built = _build_agent_messages(course_id, message, mode, context, owner_id=owner_id)
     messages = built["messages"]
     workspace = built["workspace"]
     course = built["course"]
@@ -6115,6 +6125,7 @@ def agent_chat(
     *,
     mode: str = "chat",
     context: dict[str, Any] | None = None,
+    owner_id: str = "",
 ) -> dict[str, Any]:
     workspace = load_workspace(course_id)
     course = workspace.get("course", {})
@@ -6139,7 +6150,7 @@ def agent_chat(
         "最终使用中文 Markdown 回答；有资料依据时保留[来源：文件名 · 位置]。"
     )
     messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-    user_profile_prompt = get_user_profile_prompt()["content"].strip()
+    user_profile_prompt = get_user_profile_prompt(owner_id)["content"].strip()
     if user_profile_prompt:
         messages.append(
             {

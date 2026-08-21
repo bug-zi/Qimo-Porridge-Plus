@@ -24,11 +24,11 @@ class AgentChatRequest(BaseModel):
 def chat_with_course_agent(
     course_id: str,
     payload: AgentChatRequest,
-    _owner_id: str = Depends(require_course_ownership),
+    owner_id: str = Depends(require_course_ownership),
 ) -> dict[str, Any]:
     try:
         message = payload.message.strip()
-        return agent_chat(message, course_id, mode=payload.mode, context=payload.context)
+        return agent_chat(message, course_id, mode=payload.mode, context=payload.context, owner_id=owner_id)
     except FileNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
 
@@ -37,7 +37,7 @@ def chat_with_course_agent(
 def chat_with_course_agent_stream(
     course_id: str,
     payload: AgentChatRequest,
-    _owner_id: str = Depends(require_course_ownership),
+    owner_id: str = Depends(require_course_ownership),
 ):
     def event_source():
         try:
@@ -46,6 +46,7 @@ def chat_with_course_agent_stream(
                 course_id,
                 mode=payload.mode,
                 context=payload.context,
+                owner_id=owner_id,
             ):
                 yield chunk
         except Exception as error:

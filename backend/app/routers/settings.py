@@ -4,7 +4,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from ..knowledge_service import (
@@ -20,6 +20,7 @@ from ..study_service import (
     save_runtime_model_profile,
     save_user_profile_prompt,
 )
+from .deps import current_owner_id
 
 router = APIRouter()
 
@@ -102,14 +103,18 @@ def update_runtime_model(payload: RuntimeModelUpdateRequest) -> dict[str, str | 
 
 
 @router.get("/api/user-profile")
-def user_profile_prompt() -> dict[str, str]:
-    return get_user_profile_prompt()
+def user_profile_prompt(owner_id: str = Depends(current_owner_id)) -> dict[str, str]:
+    # 阶段2多租户：自画像按用户分键存储，A 的画像不再注入 B 的 AI 对话
+    return get_user_profile_prompt(owner_id)
 
 
 @router.put("/api/user-profile")
-def update_user_profile_prompt(payload: UserProfilePromptUpdateRequest) -> dict[str, str]:
+def update_user_profile_prompt(
+    payload: UserProfilePromptUpdateRequest,
+    owner_id: str = Depends(current_owner_id),
+) -> dict[str, str]:
     try:
-        return save_user_profile_prompt(payload.content)
+        return save_user_profile_prompt(payload.content, owner_id)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
