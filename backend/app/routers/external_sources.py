@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from ..agent_runtime import get_external_source
@@ -12,6 +12,7 @@ from ..external_source_service import (
     submit_external_source,
 )
 from ..study_service import load_workspace
+from .deps import require_course_ownership
 
 router = APIRouter()
 
@@ -24,7 +25,11 @@ class ExternalSourceRequest(BaseModel):
 
 
 @router.post("/api/courses/{course_id}/external-sources", status_code=202)
-def import_external_course_source(course_id: str, payload: ExternalSourceRequest) -> dict[str, Any]:
+def import_external_course_source(
+    course_id: str,
+    payload: ExternalSourceRequest,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
     try:
         load_workspace(course_id, refresh_materials=False)
         return submit_external_source(
@@ -41,7 +46,11 @@ def import_external_course_source(course_id: str, payload: ExternalSourceRequest
 
 
 @router.get("/api/courses/{course_id}/external-sources/{source_id}")
-def external_course_source(course_id: str, source_id: str) -> dict[str, Any]:
+def external_course_source(
+    course_id: str,
+    source_id: str,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
     try:
         return get_external_source(course_id, source_id)
     except KeyError as error:
@@ -49,7 +58,11 @@ def external_course_source(course_id: str, source_id: str) -> dict[str, Any]:
 
 
 @router.post("/api/courses/{course_id}/external-sources/{source_id}/approve")
-def approve_external_course_source(course_id: str, source_id: str) -> dict[str, Any]:
+def approve_external_course_source(
+    course_id: str,
+    source_id: str,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
     try:
         return approve_external_source(course_id, source_id)
     except KeyError as error:
@@ -59,7 +72,11 @@ def approve_external_course_source(course_id: str, source_id: str) -> dict[str, 
 
 
 @router.post("/api/courses/{course_id}/external-sources/{source_id}/dismiss")
-def dismiss_external_course_source(course_id: str, source_id: str) -> dict[str, Any]:
+def dismiss_external_course_source(
+    course_id: str,
+    source_id: str,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
     try:
         return dismiss_external_source(course_id, source_id)
     except KeyError as error:

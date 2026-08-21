@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from ..agent_runtime import enqueue_agent_job
@@ -18,7 +18,7 @@ from ..study_service import (
     submit_practice_answer,
     submit_wrong_answer_retry,
 )
-from .deps import WrongAnswerArchiveResponse, create_archive_item, get_connection
+from .deps import WrongAnswerArchiveResponse, create_archive_item, get_connection, require_course_ownership
 
 router = APIRouter()
 
@@ -45,7 +45,11 @@ class TimeLogRequest(BaseModel):
 
 
 @router.post("/api/courses/{course_id}/time-log")
-def add_course_time_log(course_id: str, payload: TimeLogRequest) -> dict[str, Any]:
+def add_course_time_log(
+    course_id: str,
+    payload: TimeLogRequest,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
     try:
         return record_time(
             course_id,
@@ -61,7 +65,11 @@ def add_course_time_log(course_id: str, payload: TimeLogRequest) -> dict[str, An
 
 
 @router.delete("/api/courses/{course_id}/time-log/{entry_id}")
-def remove_course_time_log(course_id: str, entry_id: str) -> dict[str, Any]:
+def remove_course_time_log(
+    course_id: str,
+    entry_id: str,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
     try:
         return delete_time_entry(course_id, entry_id)
     except FileNotFoundError as error:
@@ -69,14 +77,22 @@ def remove_course_time_log(course_id: str, entry_id: str) -> dict[str, Any]:
 
 
 @router.post("/api/courses/{course_id}/practice/answer")
-def answer_course_practice(course_id: str, payload: PracticeAnswerRequest) -> dict[str, Any]:
+def answer_course_practice(
+    course_id: str,
+    payload: PracticeAnswerRequest,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
     try:
         return submit_practice_answer(payload.question_id, payload.answer_index, payload.mode, course_id)
     except KeyError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
 
 
-def _archive_course_wrong_answer(course_id: str, wrong_answer_id: str) -> WrongAnswerArchiveResponse:
+def _archive_course_wrong_answer(
+    course_id: str,
+    wrong_answer_id: str,
+    owner_id: str,
+) -> WrongAnswerArchiveResponse:
     try:
         workspace = load_workspace(course_id)
     except FileNotFoundError as error:
@@ -94,6 +110,7 @@ def _archive_course_wrong_answer(course_id: str, wrong_answer_id: str) -> WrongA
             item_type="wrong-answer",
             entity_id=wrong_answer_id,
             title=wrong_answer.get("title", "未命名错题"),
+            owner_id=owner_id,
             course_id=course_id,
             course_name=course.get("name"),
             payload={"wrongAnswer": wrong_answer},
@@ -107,8 +124,12 @@ def _archive_course_wrong_answer(course_id: str, wrong_answer_id: str) -> WrongA
     "/api/courses/{course_id}/wrong-answers/{wrong_answer_id}",
     response_model=WrongAnswerArchiveResponse,
 )
-def archive_course_wrong_answer(course_id: str, wrong_answer_id: str) -> WrongAnswerArchiveResponse:
-    return _archive_course_wrong_answer(course_id, wrong_answer_id)
+def archive_course_wrong_answer(
+    course_id: str,
+    wrong_answer_id: str,
+    owner_id: str = Depends(require_course_ownership),
+) -> WrongAnswerArchiveResponse:
+    return _archive_course_wrong_answer(course_id, wrong_answer_id, owner_id)
 
 
 @router.post("/api/courses/{course_id}/wrong-answers/{wrong_answer_id}/retry")
@@ -116,6 +137,7 @@ def retry_course_wrong_answer(
     course_id: str,
     wrong_answer_id: str,
     payload: WrongAnswerRetryRequest,
+    _owner_id: str = Depends(require_course_ownership),
 ) -> dict[str, Any]:
     try:
         result = submit_wrong_answer_retry(wrong_answer_id, payload.answer_index, course_id)
@@ -130,6 +152,7 @@ def retry_course_wrong_answer(
 def submit_course_mock(
     course_id: str,
     payload: MockSubmitRequest,
+    _owner_id: str = Depends(require_course_ownership),
 ) -> dict[str, Any]:
     try:
         result = submit_mock_answers(payload.answers, course_id)
@@ -141,7 +164,11 @@ def submit_course_mock(
 
 
 @router.delete("/api/courses/{course_id}/practice/answers/{question_id}")
-def clear_course_practice_answer(course_id: str, question_id: str) -> dict[str, Any]:
+def clear_course_practice_answer(
+    course_id: str,
+    question_id: str,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
     try:
         return clear_practice_answer(question_id, course_id)
     except FileNotFoundError as error:
@@ -149,7 +176,10 @@ def clear_course_practice_answer(course_id: str, question_id: str) -> dict[str, 
 
 
 @router.delete("/api/courses/{course_id}/mock/result")
-def clear_course_mock_result(course_id: str) -> dict[str, Any]:
+def clear_course_mock_result(
+    course_id: str,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
     try:
         return clear_mock_result(course_id)
     except FileNotFoundError as error:

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timedelta
 from typing import Any, Literal
 from urllib.error import HTTPError, URLError
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ..agent_runtime import enqueue_agent_job, last_proposal_resolution_at, list_pending_proposals
@@ -34,9 +35,13 @@ from ..study_service import (
 )
 from .deps import (
     ArchiveItemResponse,
+    course_is_owned,
     create_archive_item,
+    current_owner_id,
     get_connection,
+    list_active_archive_items,
     purge_expired_archive_items,
+    require_course_ownership,
 )
 
 router = APIRouter()
@@ -128,15 +133,17 @@ def include_strategy_document_content(course_id: str, workspace: dict[str, Any])
 
 
 @router.get("/api/courses", response_model=list[CourseResponse])
-def list_courses() -> list[CourseResponse]:
+def list_courses(owner_id: str = Depends(current_owner_id)) -> list[CourseResponse]:
     with get_connection() as connection:
         purge_expired_archive_items(connection)
         rows = connection.execute(
             """
             SELECT id, name, exam_date, target_score, daily_hours, progress
             FROM courses
+            WHERE owner_id = ?
             ORDER BY created_at ASC
-            """
+            """,
+            (owner_id,),
         ).fetchall()
     courses = [row_to_course(row) for row in rows]
     for course in courses:
@@ -159,17 +166,18 @@ def list_courses() -> list[CourseResponse]:
 
 
 @router.post("/api/courses", response_model=CourseResponse, status_code=201)
-def create_course(payload: CourseCreate) -> CourseResponse:
+def create_course(payload: CourseCreate, owner_id: str = Depends(current_owner_id)) -> CourseResponse:
     course_id = f"course-{int(datetime.now().timestamp() * 1000)}"
     with get_connection() as connection:
         connection.execute(
             """
             INSERT INTO courses (
-                id, name, exam_date, target_score, daily_hours, progress, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                id, owner_id, name, exam_date, target_score, daily_hours, progress, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 course_id,
+                owner_id,
                 payload.name,
                 payload.exam_date,
                 payload.target_score,
@@ -195,7 +203,7 @@ def create_course(payload: CourseCreate) -> CourseResponse:
 
 
 @router.get("/api/courses/{course_id}/workspace")
-def course_workspace(course_id: str) -> dict[str, Any]:
+def course_workspace(course_id: str, _owner_id: str = Depends(require_course_ownership)) -> dict[str, Any]:
     try:
         workspace = load_workspace(course_id)
     except (FileNotFoundError, ValueError) as error:
@@ -214,7 +222,7 @@ def course_workspace(course_id: str) -> dict[str, Any]:
 
 
 @router.get("/api/courses/{course_id}/mind-map")
-def course_mind_map(course_id: str) -> dict[str, Any]:
+def course_mind_map(course_id: str, _owner_id: str = Depends(require_course_ownership)) -> dict[str, Any]:
     try:
         mind_map = load_mind_map(course_id)
         return {"status": "ready", "courseId": course_id, "mindMap": mind_map}
@@ -229,7 +237,11 @@ def course_mind_map(course_id: str) -> dict[str, Any]:
 
 
 @router.put("/api/courses/{course_id}/mind-map")
-def update_course_mind_map(course_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+def update_course_mind_map(
+    course_id: str,
+    payload: dict[str, Any],
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
     try:
         mind_map = save_mind_map(payload, course_id)
         return {"status": "ready", "courseId": course_id, "mindMap": mind_map}
@@ -240,7 +252,7 @@ def update_course_mind_map(course_id: str, payload: dict[str, Any]) -> dict[str,
 
 
 @router.post("/api/courses/{course_id}/mind-map/generate")
-def generate_course_mind_map(course_id: str) -> dict[str, Any]:
+def generate_course_mind_map(course_id: str, _owner_id: str = Depends(require_course_ownership)) -> dict[str, Any]:
     try:
         mind_map = generate_mind_map(course_id)
         return {"status": "ready", "courseId": course_id, "mindMap": mind_map}
@@ -251,7 +263,10 @@ def generate_course_mind_map(course_id: str) -> dict[str, Any]:
 
 
 @router.post("/api/courses/{course_id}/mind-map/regroup-modules")
-def regroup_course_mind_map_modules(course_id: str) -> dict[str, Any]:
+def regroup_course_mind_map_modules(
+    course_id: str,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
     try:
         mind_map = regroup_course_modules(course_id)
         return {"status": "ready", "courseId": course_id, "mindMap": mind_map}
@@ -262,7 +277,11 @@ def regroup_course_mind_map_modules(course_id: str) -> dict[str, Any]:
 
 
 @router.get("/api/courses/{course_id}/search")
-def search_course(course_id: str, q: str = Query(min_length=1, max_length=200)) -> dict[str, Any]:
+def search_course(
+    course_id: str,
+    q: str = Query(min_length=1, max_length=200),
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
     query = q.strip()
     if not query:
         raise HTTPException(status_code=422, detail="请输入搜索关键词")
@@ -377,7 +396,11 @@ def search_course(course_id: str, q: str = Query(min_length=1, max_length=200)) 
 
 
 @router.post("/api/courses/{course_id}/setup")
-def configure_course(course_id: str, payload: CourseSetupRequest) -> dict[str, Any]:
+def configure_course(
+    course_id: str,
+    payload: CourseSetupRequest,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
     try:
         workspace = save_course_setup(payload.model_dump(), course_id)
         with get_connection() as connection:
@@ -403,7 +426,11 @@ def configure_course(course_id: str, payload: CourseSetupRequest) -> dict[str, A
 
 
 @router.post("/api/courses/{course_id}/plan/adjust")
-def adjust_course_plan_params(course_id: str, payload: PlanParamsAdjustRequest) -> dict[str, Any]:
+def adjust_course_plan_params(
+    course_id: str,
+    payload: PlanParamsAdjustRequest,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
     """计划生成后动态调整考试日期 / 复习天数 / 每日时间。
 
     - 仅 examDate 变（days/dailyHours 不变）：立即存参数，不重排，返回 {workspace, proposal: null}。
@@ -462,7 +489,11 @@ def adjust_course_plan_params(course_id: str, payload: PlanParamsAdjustRequest) 
 
 
 @router.post("/api/courses/{course_id}/diagnostic/submit")
-def submit_course_diagnostic_answers(course_id: str, payload: DiagnosticSubmitRequest) -> dict[str, Any]:
+def submit_course_diagnostic_answers(
+    course_id: str,
+    payload: DiagnosticSubmitRequest,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
     try:
         return include_strategy_document_content(course_id, submit_course_diagnostic(payload.answers, course_id))
     except KeyError as error:
@@ -477,6 +508,7 @@ def submit_course_diagnostic_answers(course_id: str, payload: DiagnosticSubmitRe
 def update_course_workspace(
     course_id: str,
     payload: WorkspaceUpdateRequest,
+    _owner_id: str = Depends(require_course_ownership),
 ) -> dict[str, Any]:
     try:
         before = load_workspace(course_id, refresh_materials=False)
@@ -496,16 +528,16 @@ def update_course_workspace(
 
 
 @router.delete("/api/courses/{course_id}", response_model=ArchiveItemResponse)
-def archive_course(course_id: str) -> ArchiveItemResponse:
+def archive_course(course_id: str, owner_id: str = Depends(require_course_ownership)) -> ArchiveItemResponse:
     with get_connection() as connection:
         purge_expired_archive_items(connection)
         course = connection.execute(
             """
             SELECT id, name, exam_date, target_score, daily_hours, progress, created_at
             FROM courses
-            WHERE id = ?
+            WHERE id = ? AND owner_id = ?
             """,
-            (course_id,),
+            (course_id, owner_id),
         ).fetchone()
         if course is not None:
             plan_tasks = connection.execute(
@@ -521,6 +553,7 @@ def archive_course(course_id: str) -> ArchiveItemResponse:
                 item_type="course",
                 entity_id=course_id,
                 title=course["name"],
+                owner_id=owner_id,
                 course_id=course_id,
                 course_name=course["name"],
                 payload={
@@ -548,6 +581,7 @@ def archive_course(course_id: str) -> ArchiveItemResponse:
             item_type="course",
             entity_id=course_id,
             title=workspace_course.get("name", "未命名课程"),
+            owner_id=owner_id,
             course_id=course_id,
             course_name=workspace_course.get("name"),
             payload={"storage": "workspace", "workspace": workspace},
@@ -558,7 +592,7 @@ def archive_course(course_id: str) -> ArchiveItemResponse:
 
 
 @router.get("/api/courses/{course_id}/plan", response_model=list[PlanTaskResponse])
-def get_course_plan(course_id: str) -> list[PlanTaskResponse]:
+def get_course_plan(course_id: str, _owner_id: str = Depends(require_course_ownership)) -> list[PlanTaskResponse]:
     with get_connection() as connection:
         course = connection.execute("SELECT id FROM courses WHERE id = ?", (course_id,)).fetchone()
         if course is None:
@@ -576,14 +610,149 @@ def get_course_plan(course_id: str) -> list[PlanTaskResponse]:
 
 
 @router.get("/api/courses/{course_id}/knowledge/status")
-def course_knowledge_status(course_id: str) -> dict[str, Any]:
+def course_knowledge_status(course_id: str, _owner_id: str = Depends(require_course_ownership)) -> dict[str, Any]:
     return get_knowledge_status(course_id)
 
 
 @router.post("/api/courses/{course_id}/knowledge/reindex")
-def reindex_course_knowledge(course_id: str) -> dict[str, Any]:
+def reindex_course_knowledge(course_id: str, _owner_id: str = Depends(require_course_ownership)) -> dict[str, Any]:
     try:
         sync_course_knowledge(course_id)
         return rebuild_course_embeddings(course_id)
     except (RuntimeError, HTTPError, URLError, TimeoutError, OSError) as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
+
+
+@router.get("/api/archive", response_model=list[ArchiveItemResponse])
+def list_archive(owner_id: str = Depends(current_owner_id)) -> list[ArchiveItemResponse]:
+    """当前用户的归档列表（fa730d1 误删后恢复，阶段2 起带 owner 过滤）。"""
+    with get_connection() as connection:
+        return list_active_archive_items(connection, owner_id)
+
+
+@router.post("/api/archive/{archive_id}/restore")
+def restore_archive_item(archive_id: str, owner_id: str = Depends(current_owner_id)) -> dict[str, Any]:
+    """恢复归档项（fa730d1 误删后恢复，阶段2 起仅能恢复自己的归档）。"""
+    with get_connection() as connection:
+        purge_expired_archive_items(connection)
+        row = connection.execute(
+            "SELECT * FROM archived_items WHERE id = ? AND owner_id = ?",
+            (archive_id, owner_id),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="归档内容不存在或已超过 7 天")
+
+        payload = json.loads(row["payload"])
+        item_type = row["item_type"]
+        if item_type == "course":
+            if payload.get("storage") == "workspace":
+                workspace = payload["workspace"]
+                restored_course_id = str(workspace.get("course", {}).get("id", ""))
+                save_workspace(workspace, restored_course_id)
+                # workspace 归档的课程当时不在 courses 索引表里，恢复时补登记到当前用户名下
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO courses (
+                        id, owner_id, name, exam_date, target_score, daily_hours, progress, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        restored_course_id,
+                        owner_id,
+                        workspace["course"].get("name", "未命名课程"),
+                        workspace["course"].get("examDate", ""),
+                        int(workspace["course"].get("targetScore", 0)),
+                        float(workspace["course"].get("dailyHours", 0)),
+                        int(workspace["course"].get("progress", 0)),
+                        datetime.now().isoformat(timespec="seconds"),
+                    ),
+                )
+                course = row_to_course({"id": restored_course_id, **_workspace_course_fields(workspace["course"])})
+                connection.execute("DELETE FROM archived_items WHERE id = ?", (archive_id,))
+                return {
+                    "item_type": item_type,
+                    "course": course.model_dump(),
+                    "workspace": workspace,
+                    "archive_items": [item.model_dump() for item in list_active_archive_items(connection, owner_id)],
+                }
+
+            course_payload = payload["course"]
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO courses (
+                    id, owner_id, name, exam_date, target_score, daily_hours, progress, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    course_payload["id"],
+                    owner_id,
+                    course_payload["name"],
+                    course_payload["exam_date"],
+                    course_payload["target_score"],
+                    course_payload["daily_hours"],
+                    course_payload.get("progress", 0),
+                    course_payload.get("created_at", datetime.now().isoformat(timespec="seconds")),
+                ),
+            )
+            connection.execute("DELETE FROM plan_tasks WHERE course_id = ?", (course_payload["id"],))
+            connection.executemany(
+                """
+                INSERT OR REPLACE INTO plan_tasks (
+                    id, course_id, title, duration, progress, priority, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        task["id"],
+                        task["course_id"],
+                        task["title"],
+                        task["duration"],
+                        task.get("progress", 0),
+                        task["priority"],
+                        task["status"],
+                    )
+                    for task in payload.get("planTasks", [])
+                ],
+            )
+            connection.execute("DELETE FROM archived_items WHERE id = ?", (archive_id,))
+            return {
+                "item_type": item_type,
+                "course": row_to_course(course_payload).model_dump(),
+                "archive_items": [item.model_dump() for item in list_active_archive_items(connection, owner_id)],
+            }
+
+        if item_type == "wrong-answer":
+            course_id = str(row["course_id"] or "")
+            if not course_id:
+                raise HTTPException(status_code=422, detail="归档错题缺少课程信息")
+            if not course_is_owned(connection, course_id, owner_id):
+                raise HTTPException(status_code=404, detail="课程不存在")
+            try:
+                workspace = load_workspace(course_id)
+            except FileNotFoundError as error:
+                raise HTTPException(status_code=404, detail=str(error)) from error
+
+            wrong_answer = payload["wrongAnswer"]
+            wrong_answers = workspace.setdefault("wrongAnswers", [])
+            if not any(item.get("id") == wrong_answer.get("id") for item in wrong_answers):
+                workspace["wrongAnswers"] = [wrong_answer, *wrong_answers]
+            save_workspace(workspace, course_id)
+            connection.execute("DELETE FROM archived_items WHERE id = ?", (archive_id,))
+            return {
+                "item_type": item_type,
+                "workspace": workspace,
+                "archive_items": [item.model_dump() for item in list_active_archive_items(connection, owner_id)],
+            }
+
+    raise HTTPException(status_code=422, detail="归档类型暂不支持恢复")
+
+
+def _workspace_course_fields(course: dict[str, Any]) -> dict[str, Any]:
+    """workspace.course（camelCase）→ courses 索引表字段（snake_case）的映射。"""
+    return {
+        "name": course.get("name", "未命名课程"),
+        "exam_date": course.get("examDate", ""),
+        "target_score": course.get("targetScore", 0),
+        "daily_hours": course.get("dailyHours", 0),
+        "progress": course.get("progress", 0),
+    }

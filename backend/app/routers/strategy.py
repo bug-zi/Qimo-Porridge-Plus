@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from ..agent_runtime import enqueue_agent_job
@@ -18,7 +18,7 @@ from ..study_service import (
     update_course_prompt,
 )
 from .courses import include_strategy_document_content
-from .deps import get_connection
+from .deps import get_connection, require_course_ownership
 
 router = APIRouter()
 
@@ -36,7 +36,10 @@ class CoursePromptUpdateRequest(BaseModel):
 
 
 @router.get("/api/courses/{course_id}/strategy-documents")
-def course_strategy_documents(course_id: str) -> dict[str, Any]:
+def course_strategy_documents(
+    course_id: str,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
     try:
         return get_strategy_documents(course_id)
     except (FileNotFoundError, ValueError) as error:
@@ -44,7 +47,10 @@ def course_strategy_documents(course_id: str) -> dict[str, Any]:
 
 
 @router.post("/api/courses/{course_id}/strategy-documents/generate")
-def generate_course_strategy_documents(course_id: str) -> dict[str, Any]:
+def generate_course_strategy_documents(
+    course_id: str,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
     try:
         return generate_strategy_documents(course_id)
     except ValueError as error:
@@ -57,6 +63,7 @@ def generate_course_strategy_documents(course_id: str) -> dict[str, Any]:
 def update_course_strategy_documents(
     course_id: str,
     payload: StrategyDocumentsUpdateRequest,
+    _owner_id: str = Depends(require_course_ownership),
 ) -> dict[str, Any]:
     try:
         return save_strategy_documents(
@@ -76,6 +83,7 @@ def update_course_strategy_documents(
 def approve_course_strategy_documents(
     course_id: str,
     payload: StrategyDocumentsUpdateRequest,
+    _owner_id: str = Depends(require_course_ownership),
 ) -> dict[str, Any]:
     try:
         return include_strategy_document_content(
@@ -99,6 +107,7 @@ def approve_course_strategy_documents(
 def enqueue_course_strategy_approval(
     course_id: str,
     payload: StrategyDocumentsUpdateRequest,
+    _owner_id: str = Depends(require_course_ownership),
 ) -> dict[str, Any]:
     try:
         job_id = enqueue_agent_job(
@@ -118,7 +127,11 @@ def enqueue_course_strategy_approval(
 
 
 @router.put("/api/courses/{course_id}/course-prompt")
-def save_course_prompt(course_id: str, payload: CoursePromptUpdateRequest) -> dict[str, Any]:
+def save_course_prompt(
+    course_id: str,
+    payload: CoursePromptUpdateRequest,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
     try:
         return update_course_prompt(
             course_id,
@@ -132,7 +145,11 @@ def save_course_prompt(course_id: str, payload: CoursePromptUpdateRequest) -> di
 
 
 @router.post("/api/courses/{course_id}/adjustment-proposals/{proposal_id}/apply")
-def apply_course_adjustment_proposal(course_id: str, proposal_id: str) -> dict[str, Any]:
+def apply_course_adjustment_proposal(
+    course_id: str,
+    proposal_id: str,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
     try:
         workspace, proposal = apply_proposal(
             course_id,
@@ -176,7 +193,11 @@ def apply_course_adjustment_proposal(course_id: str, proposal_id: str) -> dict[s
 
 
 @router.post("/api/courses/{course_id}/adjustment-proposals/{proposal_id}/dismiss")
-def dismiss_course_adjustment_proposal(course_id: str, proposal_id: str) -> dict[str, Any]:
+def dismiss_course_adjustment_proposal(
+    course_id: str,
+    proposal_id: str,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
     try:
         return dismiss_proposal(course_id, proposal_id)
     except KeyError as error:

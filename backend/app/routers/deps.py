@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 from pydantic import BaseModel
 
 DATA_DIRECTORY = Path(__file__).resolve().parent.parent.parent / "data"
@@ -38,6 +38,26 @@ def current_owner_id(request: Request) -> str:
     if not user_id:
         raise HTTPException(status_code=401, detail="未登录")
     return str(user_id)
+
+
+def course_is_owned(connection: sqlite3.Connection, course_id: str, owner_id: str) -> bool:
+    """课程存在且属于该 owner。路由层用它做归属校验（不通过 → 404）。"""
+    row = connection.execute(
+        "SELECT 1 FROM courses WHERE id = ? AND owner_id = ?",
+        (course_id, owner_id),
+    ).fetchone()
+    return row is not None
+
+
+def require_course_ownership(course_id: str, owner_id: str = Depends(current_owner_id)) -> str:
+    """课程归属依赖：校验 course_id 属于当前用户，返回 owner_id（供 INSERT/归档使用）。
+
+    归属不通过统一 404（不泄露课程是否存在）；课程不存在同样 404。
+    """
+    with get_connection() as connection:
+        if not course_is_owned(connection, course_id, owner_id):
+            raise HTTPException(status_code=404, detail="课程不存在")
+    return owner_id
 
 
 class ArchiveItemResponse(BaseModel):
@@ -76,15 +96,31 @@ def purge_expired_archive_items(connection: sqlite3.Connection) -> None:
     )
 
 
-def list_active_archive_items(connection: sqlite3.Connection) -> list[ArchiveItemResponse]:
+def list_active_archive_items(
+    connection: sqlite3.Connection,
+    owner_id: str | None = None,
+) -> list[ArchiveItemResponse]:
+    """列出当前有效的归档项；owner_id 非空时只看该用户的（阶段2 多租户）。"""
     purge_expired_archive_items(connection)
-    rows = connection.execute(
-        """
-        SELECT id, item_type, entity_id, title, course_id, course_name, deleted_at, purge_after
-        FROM archived_items
-        ORDER BY deleted_at DESC
-        """
-    ).fetchall()
+    if owner_id is None:
+        rows = connection.execute(
+            """
+            SELECT id, item_type, entity_id, title, course_id, course_name, deleted_at, purge_after
+            FROM archived_items
+            ORDER BY deleted_at DESC
+            """
+        ).fetchall()
+    else:
+        rows = connection.execute(
+            """
+            SELECT id, item_type, entity_id, title, course_id, course_name, deleted_at, purge_after
+            FROM archived_items
+            WHERE owner_id = ?
+            ORDER BY deleted_at DESC
+            """
+            ,
+            (owner_id,),
+        ).fetchall()
     return [row_to_archive_item(row) for row in rows]
 
 
@@ -95,6 +131,7 @@ def create_archive_item(
     entity_id: str,
     title: str,
     payload: dict[str, Any],
+    owner_id: str = "",
     course_id: str | None = None,
     course_name: str | None = None,
 ) -> ArchiveItemResponse:
@@ -106,11 +143,12 @@ def create_archive_item(
     connection.execute(
         """
         INSERT INTO archived_items (
-            id, item_type, entity_id, title, course_id, course_name, payload, deleted_at, purge_after
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            id, owner_id, item_type, entity_id, title, course_id, course_name, payload, deleted_at, purge_after
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             archive_id,
+            owner_id,
             item_type,
             entity_id,
             title,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from ..agent_runtime import (
@@ -13,6 +13,7 @@ from ..agent_runtime import (
     update_glossary_term_fields,
 )
 from ..study_service import load_workspace
+from .deps import require_course_ownership
 
 router = APIRouter()
 
@@ -36,7 +37,7 @@ class GlossaryRefreshRequest(BaseModel):
 
 
 @router.get("/api/courses/{course_id}/glossary")
-def get_course_glossary(course_id: str) -> dict[str, Any]:
+def get_course_glossary(course_id: str, _owner_id: str = Depends(require_course_ownership)) -> dict[str, Any]:
     try:
         load_workspace(course_id, refresh_materials=False)
         return {
@@ -49,7 +50,7 @@ def get_course_glossary(course_id: str) -> dict[str, Any]:
 
 
 @router.get("/api/courses/{course_id}/glossary/status")
-def get_course_glossary_status(course_id: str) -> dict[str, Any]:
+def get_course_glossary_status(course_id: str, _owner_id: str = Depends(require_course_ownership)) -> dict[str, Any]:
     try:
         load_workspace(course_id, refresh_materials=False)
         return get_glossary_refresh_state(course_id)
@@ -58,7 +59,12 @@ def get_course_glossary_status(course_id: str) -> dict[str, Any]:
 
 
 @router.put("/api/courses/{course_id}/glossary/terms/{term_id}")
-def update_course_glossary_term(course_id: str, term_id: str, payload: GlossaryTermUpdateRequest) -> dict[str, Any]:
+def update_course_glossary_term(
+    course_id: str,
+    term_id: str,
+    payload: GlossaryTermUpdateRequest,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
     try:
         fields = {key: value for key, value in payload.model_dump().items() if value is not None}
         if not fields:
@@ -76,7 +82,11 @@ def update_course_glossary_term(course_id: str, term_id: str, payload: GlossaryT
 
 
 @router.delete("/api/courses/{course_id}/glossary/terms/{term_id}")
-def delete_course_glossary_term(course_id: str, term_id: str) -> dict[str, Any]:
+def delete_course_glossary_term(
+    course_id: str,
+    term_id: str,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
     try:
         delete_glossary_term(course_id, term_id)
         return {
@@ -89,7 +99,11 @@ def delete_course_glossary_term(course_id: str, term_id: str) -> dict[str, Any]:
 
 
 @router.post("/api/courses/{course_id}/glossary/refresh", status_code=202)
-def refresh_course_glossary(course_id: str, payload: GlossaryRefreshRequest | None = None) -> dict[str, Any]:
+def refresh_course_glossary(
+    course_id: str,
+    payload: GlossaryRefreshRequest | None = None,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
     try:
         load_workspace(course_id, refresh_materials=False)
         force = bool(payload.force) if payload else False

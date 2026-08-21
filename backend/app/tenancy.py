@@ -5,13 +5,11 @@ courses / archived_items 两表带 owner_id；存量无主数据在启动时归�
 全部以 course_id 为索引——路由层校验课程归属后，这些表的数据即被传递隔离，
 无需逐表加列。
 
-owner_id 的来源：AuthMiddleware 验证 access token 后写入 request.state.user_id，
-路由层经 Depends(current_owner_id) 取用。
+运行时归属校验在 routers/deps.py：current_owner_id + require_course_ownership
+（本模块只承担启动期迁移，避免与 deps 循环导入）。
 """
 
 from __future__ import annotations
-
-import sqlite3
 
 from .routers.deps import get_connection
 
@@ -51,12 +49,3 @@ def claim_legacy_courses() -> None:
             "UPDATE archived_items SET owner_id = ? WHERE owner_id = ''",
             (owner_id,),
         )
-
-
-def course_is_owned(connection: sqlite3.Connection, course_id: str, owner_id: str) -> bool:
-    """课程存在且属于该 owner。路由层用它做归属校验（不通过 → 404）。"""
-    row = connection.execute(
-        "SELECT 1 FROM courses WHERE id = ? AND owner_id = ?",
-        (course_id, owner_id),
-    ).fetchone()
-    return row is not None

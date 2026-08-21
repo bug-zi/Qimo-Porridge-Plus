@@ -5,7 +5,7 @@ import mimetypes
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request as FastAPIRequest
+from fastapi import APIRouter, Depends, HTTPException, Request as FastAPIRequest
 from fastapi.responses import FileResponse
 
 from ..agent_runtime import enqueue_agent_job
@@ -18,12 +18,17 @@ from ..study_service import (
     resolve_course_material_path,
     upload_course_materials,
 )
+from .deps import require_course_ownership
 
 router = APIRouter()
 
 
 @router.get("/api/courses/{course_id}/materials/preview/{material_path:path}")
-def preview_course_material(course_id: str, material_path: str) -> dict[str, Any]:
+def preview_course_material(
+    course_id: str,
+    material_path: str,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
     try:
         return build_material_preview(material_path, course_id)
     except FileNotFoundError as error:
@@ -31,7 +36,11 @@ def preview_course_material(course_id: str, material_path: str) -> dict[str, Any
 
 
 @router.get("/api/courses/{course_id}/materials/file/{material_path:path}")
-def open_course_material(course_id: str, material_path: str) -> FileResponse:
+def open_course_material(
+    course_id: str,
+    material_path: str,
+    _owner_id: str = Depends(require_course_ownership),
+) -> FileResponse:
     try:
         file_path = resolve_course_material_path(material_path, course_id)
     except FileNotFoundError as error:
@@ -45,7 +54,11 @@ def open_course_material(course_id: str, material_path: str) -> FileResponse:
 
 
 @router.get("/api/courses/{course_id}/materials/converted-file/{material_path:path}")
-def open_converted_course_material(course_id: str, material_path: str) -> FileResponse:
+def open_converted_course_material(
+    course_id: str,
+    material_path: str,
+    _owner_id: str = Depends(require_course_ownership),
+) -> FileResponse:
     try:
         file_path = resolve_converted_material_pdf_path(material_path, course_id)
     except FileNotFoundError as error:
@@ -62,6 +75,7 @@ def open_converted_course_material(course_id: str, material_path: str) -> FileRe
 async def upload_course_material_batch(
     course_id: str,
     request: FastAPIRequest,
+    _owner_id: str = Depends(require_course_ownership),
 ) -> dict[str, Any]:
     try:
         payload = await request.body()
@@ -99,6 +113,7 @@ async def upload_course_material_batch(
 def delete_generic_course_material(
     course_id: str,
     material_path: str,
+    _owner_id: str = Depends(require_course_ownership),
 ) -> dict[str, Any]:
     try:
         workspace = delete_course_material(material_path, course_id)
@@ -113,6 +128,7 @@ def delete_generic_course_material(
 @router.post("/api/courses/{course_id}/materials/rescan")
 def rescan_course_materials(
     course_id: str,
+    _owner_id: str = Depends(require_course_ownership),
 ) -> dict[str, Any]:
     try:
         workspace = refresh_workspace_materials(course_id)
