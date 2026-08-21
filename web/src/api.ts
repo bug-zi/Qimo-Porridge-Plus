@@ -30,7 +30,8 @@ import type {
   WrongAnswer,
 } from './types'
 
-const apiBaseUrl = 'http://127.0.0.1:8000/api'
+// 生产同域留空走相对路径（nginx 反代 /api）；本地开发走 vite proxy；特殊部署用 VITE_API_BASE_URL 覆盖
+export const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? '') + '/api'
 
 function encodeMaterialPath(relativePath: string) {
   return relativePath.split('/').map(encodeURIComponent).join('/')

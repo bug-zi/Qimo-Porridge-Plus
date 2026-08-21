@@ -217,7 +217,7 @@ def _atomic_write_text(path: Path, content: str) -> None:
 
 def _metadata_connection() -> sqlite3.Connection:
     DATA_DIRECTORY.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DATA_DIRECTORY / "exam_booster.db")
+    connection = sqlite3.connect(DATA_DIRECTORY / "exam_booster.db", timeout=30)
     connection.row_factory = sqlite3.Row
     return connection
 

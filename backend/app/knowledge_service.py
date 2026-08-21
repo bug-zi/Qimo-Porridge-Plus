@@ -51,14 +51,14 @@ def _now() -> str:
 
 def _database_connection() -> sqlite3.Connection:
     DATA_DIRECTORY.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DATABASE_PATH)
+    connection = sqlite3.connect(DATABASE_PATH, timeout=30)
     connection.row_factory = sqlite3.Row
     return connection
 
 
 def _embedding_connection() -> sqlite3.Connection:
     DATA_DIRECTORY.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(EMBEDDING_CACHE_PATH)
+    connection = sqlite3.connect(EMBEDDING_CACHE_PATH, timeout=30)
     connection.row_factory = sqlite3.Row
     return connection
 
