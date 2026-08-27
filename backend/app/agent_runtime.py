@@ -4,6 +4,7 @@ import json
 import re
 import sqlite3
 import threading
+import time
 import uuid
 from .model_usage import get_scoped_model_usage
 from collections.abc import Iterator
@@ -19,6 +20,18 @@ DATABASE_PATH = DATA_DIRECTORY / "exam_booster.db"
 
 class AgentJobCancelled(RuntimeError):
     """Raised cooperatively when a persisted background job is cancelled."""
+
+
+# 单个后台 job 的硬超时（秒）。handler 无法被强杀（Python 线程特性），
+# 超时后 worker 放弃等待该线程、标记 job 失败并继续处理队列——被弃线程
+# 若最终自己完成写入，仅多占一点内存，随进程退出回收。
+# 取 2 小时：最慢正常任务（策略生成串行多次模型调用，思考型模型单次
+# 最长约 30 分钟）的 4 倍裕量。阶段1-3。
+AGENT_JOB_HARD_TIMEOUT_SECONDS = 2 * 60 * 60
+
+
+class AgentJobTimeout(RuntimeError):
+    """Raised by the worker loop when a job exceeds AGENT_JOB_HARD_TIMEOUT_SECONDS."""
 
 
 
@@ -588,15 +601,42 @@ class AgentJobWorker:
                 target=_lease_heartbeat, args=(job["id"], heartbeat_stop), daemon=True
             )
             heartbeat.start()
+            # handler 跑在子线程：Python 无法强杀线程，超时后放弃该线程、
+            # 标记 job 失败并继续处理后续任务，保证队列永不永久卡死（阶段1-3）。
+            # 超时前每 2s 检查一次停止信号，让 stop() 不必等满硬超时。
+            result_holder: dict[str, Any] = {}
+            error_holder: list[BaseException] = []
+
+            def _execute() -> None:
+                try:
+                    handler = self._handlers.get(job["jobType"])
+                    if handler is None:
+                        raise RuntimeError(f"未注册后台任务处理器：{job['jobType']}")
+                    payload = {**job["payload"], "_jobId": job["id"]}
+                    result_holder["result"] = handler(job["courseId"], payload)
+                except BaseException as error:  # noqa: BLE001 - 记录后由主循环统一落库
+                    error_holder.append(error)
+
+            worker_thread = threading.Thread(
+                target=_execute, name=f"agent-job-{job['id'][:12]}", daemon=True
+            )
+            worker_thread.start()
+            timed_out = False
+            deadline = time.monotonic() + AGENT_JOB_HARD_TIMEOUT_SECONDS
+            while worker_thread.is_alive() and not timed_out:
+                worker_thread.join(timeout=2.0)
+                if worker_thread.is_alive() and time.monotonic() >= deadline:
+                    timed_out = True
             try:
-                handler = self._handlers.get(job["jobType"])
-                if handler is None:
-                    raise RuntimeError(f"未注册后台任务处理器：{job['jobType']}")
-                payload = {**job["payload"], "_jobId": job["id"]}
-                result = handler(job["courseId"], payload)
-                _complete_job(job["id"], result)
-            except Exception as error:
-                _fail_job(job, error)
+                if timed_out:
+                    _fail_job(job, AgentJobTimeout(
+                        f"后台任务超过硬超时 {AGENT_JOB_HARD_TIMEOUT_SECONDS}s 被放弃"
+                        "（handler 线程仍在后台运行；请检查模型上游是否挂起并重启后端以回收）"
+                    ))
+                elif error_holder:
+                    _fail_job(job, error_holder[0])
+                else:
+                    _complete_job(job["id"], result_holder.get("result"))
             finally:
                 heartbeat_stop.set()
                 heartbeat.join(timeout=1)
