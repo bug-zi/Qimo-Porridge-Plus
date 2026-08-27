@@ -29,13 +29,16 @@ from .model_usage import record_call_result, record_call_start
 RUNTIME_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 
 MODEL_CONNECT_TIMEOUT_SECONDS = 20
-# 单次模型请求读超时。非流式请求要等整个响应体到齐，因此它等价于“单次请求
-# 总时长上限”。思考型模型（glm-5.2）生成一节课讲义 JSON 实测需 5-8 分钟，
-# 300s/600s 会把正常慢请求误杀成超时，造成“超时→重试→再超时”假死循环。
-# 取 1800s（30 分钟）：约为最慢正常请求的 4 倍，事实上等于不设限；保留有限值
-# 是因为本服务为单线程后台 worker——上游“静默挂起”（aiedulab 已发生过）在
-# timeout=None 时会永久卡死生成队列且无任何机制可救。真正的解法是流式 + 首
-# token 超时（30s 无首字即判死），届时可安全去掉整包超时。
+# 首 token 超时：流式请求发出后等第一个字节的最长时间。思考型模型（glm-5.2 等）
+# 出结果前有 5-8 分钟静默期，但那是“非流式整包等待”下的表现；改流式后上游会在
+# 思考阶段就推送首个 chunk（或至少 keep-alive 字节），30s 无任何字节说明上游已
+# 挂起/死机，立即判死重试或 failover，不再耗满整包超时。这是“区分思考与挂起”的关键。
+MODEL_FIRST_TOKEN_TIMEOUT_SECONDS = 30
+# 单次模型请求的整包上限（流式下=首字节之后的总读流时长上限）。
+# 阶段1-2 流式改造后：首 30s 由 MODEL_FIRST_TOKEN_TIMEOUT_SECONDS 把关，
+# 之后只要流持续有数据，读到这里为止。最慢正常请求（思考型模型完整一节课
+# 讲义 JSON）实测约 8 分钟，取 1800s 为其约 4 倍裕量；真实挂起已被首 token
+# 超时拦截，不会吃满这个值。
 MODEL_REQUEST_TIMEOUT_SECONDS = 1800
 MODEL_MAX_ATTEMPTS = 3
 MODEL_RETRYABLE_HTTP_CODES = {429, 500, 502, 503, 504}
@@ -387,7 +390,97 @@ def probe_model_chat(base_url: str, api_key: str, model: str) -> dict[str, Any]:
     # （HTTP 200 已证明鉴权与额度通过）。
     return {"success": True, "message": f"模型 {model.strip()} 实测可用", "content": content[:40]}
 
+def _read_sse_response(response, operation: str) -> dict[str, Any]:
+    """读取流式 SSE 响应并重组为非流式结构（阶段1-2）。
+
+    socket timeout 全程为 MODEL_FIRST_TOKEN_TIMEOUT_SECONDS（30s）：首字节前
+    判死静默挂起；读流中它退化为"相邻 chunk 间隔上限"，一旦流持续到达即不断续命。
+    tool_calls 按 index 组装回非流式契约（arguments 为完整 JSON 字符串），
+    _model_agent_turn 等消费方无感知。流式响应通常不带 usage，缺失时按 0 计。
+    """
+    content_parts: list[str] = []
+    tool_call_buffers: dict[int, dict[str, Any]] = {}
+    usage: dict[str, Any] | None = None
+    role = "assistant"
+    for raw_line in response:
+        if not raw_line:
+            continue
+        line = raw_line.decode("utf-8", errors="replace").strip()
+        if not line.startswith("data:"):
+            continue
+        data_str = line[len("data:"):].strip()
+        if not data_str:
+            continue
+        if data_str == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data_str)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(chunk, dict):
+            continue
+        if isinstance(chunk.get("usage"), dict):
+            usage = chunk["usage"]
+        choices = chunk.get("choices") or []
+        if not choices:
+            continue
+        delta = choices[0].get("delta") or {}
+        if isinstance(delta.get("role"), str):
+            role = delta["role"]
+        piece = delta.get("content")
+        if isinstance(piece, str) and piece:
+            content_parts.append(piece)
+        for fragment in delta.get("tool_calls") or []:
+            if not isinstance(fragment, dict):
+                continue
+            try:
+                index_key = int(fragment.get("index", 0))
+            except (TypeError, ValueError):
+                index_key = len(tool_call_buffers)
+            bucket = tool_call_buffers.setdefault(index_key, {"id": "", "name": "", "arguments": ""})
+            fragment_id = fragment.get("id")
+            if isinstance(fragment_id, str) and fragment_id:
+                bucket["id"] = fragment_id
+            function = fragment.get("function") or {}
+            fname = function.get("name")
+            if isinstance(fname, str) and fname:
+                bucket["name"] = fname
+            fargs = function.get("arguments")
+            if isinstance(fargs, str):
+                bucket["arguments"] += fargs
+    content = "".join(content_parts)
+    message: dict[str, Any] = {"role": role, "content": content}
+    if tool_call_buffers:
+        message["tool_calls"] = [
+            {
+                "id": tool_call_buffers[index]["id"],
+                "type": "function",
+                "function": {
+                    "name": tool_call_buffers[index]["name"],
+                    "arguments": tool_call_buffers[index]["arguments"] or "{}",
+                },
+            }
+            for index in sorted(tool_call_buffers)
+        ]
+    if not content_parts and not tool_call_buffers:
+        raise RuntimeError(f"{operation}流式响应无内容")
+    result: dict[str, Any] = {
+        "choices": [{"index": 0, "finish_reason": "stop", "message": message}],
+        "object": "chat.completion",
+    }
+    if usage is not None:
+        result["usage"] = usage
+    return result
+
+
 def _request_model_json(request: Request, operation: str, *, deadline: float | None = None) -> dict[str, Any]:
+    """发流式请求并重组为非流式结果（阶段1-2 改造）。
+
+    对外契约与旧非流式版本完全一致（返回 OpenAI chat completion dict），
+    内部改为 stream=True + SSE 重组，以获得首 token 超时能力：
+    连接建立 timeout=MODEL_FIRST_TOKEN_TIMEOUT_SECONDS，30s 无首字节判死。
+    注意：request 必须由 _provider_request(..., stream=True) 构建。
+    """
     last_error: Exception | None = None
     http_attempts = 0
     for attempt in range(1, MODEL_TRANSIENT_MAX_ATTEMPTS + 1):
@@ -401,11 +494,11 @@ def _request_model_json(request: Request, operation: str, *, deadline: float | N
                 body_model = ""
             _record_model_call_start(body_model)
             record_call_start(body_model)
-            with urlopen(request, timeout=MODEL_REQUEST_TIMEOUT_SECONDS) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            with urlopen(request, timeout=MODEL_FIRST_TOKEN_TIMEOUT_SECONDS) as response:
+                data = _read_sse_response(response, operation)
             if not isinstance(data, dict):
                 raise RuntimeError(f"{operation}返回格式无效")
-            _record_model_usage(data, body_model)
+            _record_model_usage(data if isinstance(data.get("usage"), dict) else {}, body_model)
             record_call_result(data, body_model)
             return data
         except HTTPError as error:
@@ -426,6 +519,14 @@ def _request_model_json(request: Request, operation: str, *, deadline: float | N
                 )
         except (URLError, TimeoutError, OSError) as error:
             last_error = error
+            # 首 token 超时（socket.timeout 是 OSError 子类）：上游静默挂起，
+            # 不值得按瞬时错误退避 6 次——快速重试一次后让 provider 预算接管。
+            if isinstance(error, TimeoutError) or "timed out" in str(error):
+                if attempt >= 2:
+                    raise RuntimeError(f"{operation}首字节超时（上游无响应）") from error
+                retry_delay = _transient_retry_delay(attempt)
+                time.sleep(retry_delay)
+                continue
             # 连接级瞬时错误（SSL EOF/重置/超时）单独给更激进的重试预算，熬过网关坏窗口。
             if attempt >= MODEL_TRANSIENT_MAX_ATTEMPTS:
                 raise RuntimeError(f"{operation}连接失败或响应超时") from error
@@ -456,7 +557,8 @@ def _model_completion(
 
     errors: list[str] = []
     for provider in providers:
-        request = _provider_request(provider, payload)
+        # 阶段1-2：内部改流式以获得首 token 超时；_read_sse_response 重组回非流式结构。
+        request = _provider_request(provider, payload, stream=True)
         try:
             data = _request_model_json(
                 request,
@@ -514,7 +616,8 @@ def _model_agent_turn(messages: list[dict[str, Any]], tools: list[dict[str, Any]
     data: dict[str, Any] = {}
     errors: list[str] = []
     for provider in providers:
-        request = _provider_request(provider, payload)
+        # 阶段1-2：同 _model_completion，内部流式 + SSE 重组。
+        request = _provider_request(provider, payload, stream=True)
         try:
             data = _request_model_json(
                 request,
@@ -572,7 +675,9 @@ def _open_model_stream(request: Request, operation: str, *, deadline: float | No
             raise RuntimeError(f"{operation}超出单 provider 时间预算，立即改投备用模型")
         retry_delay = 0.0
         try:
-            return urlopen(request, timeout=MODEL_REQUEST_TIMEOUT_SECONDS)
+            # 首 token 超时：连接建立阶段 30s 无首字节判死（阶段1-2）。
+            # 读流阶段的 timeout 由 _stream_model_turn 的迭代循环天然接管。
+            return urlopen(request, timeout=MODEL_FIRST_TOKEN_TIMEOUT_SECONDS)
         except HTTPError as error:
             last_error = error
             http_attempts += 1
