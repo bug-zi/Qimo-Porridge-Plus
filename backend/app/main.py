@@ -61,6 +61,7 @@ def _approve_strategy_documents_job(course_id: str, payload: dict[str, Any]) -> 
         # 收尾，应排队等待共享锁，而不是把本次补生成误报为失败。
         wait_for_generation_lock=True,
         job_id=str(payload.get("_jobId", "")),
+        lease_token=str(payload.get("_leaseToken", "")),
     )
     # 队列 completed 只表示 handler 正常返回；业务完成度必须随结果返回。
     lesson_tasks = [

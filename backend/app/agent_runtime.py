@@ -231,6 +231,18 @@ def initialize_agent_database() -> None:
             if column not in existing_columns:
                 connection.execute(f"ALTER TABLE mcp_servers ADD COLUMN {column} {definition}")
 
+        # agent_jobs 表：追加 lease_token 列（代际 fencing）。每次 claim 生成新 token，
+        # 完成/失败/续租都校验 token——lease 过期被二次 claim 后，旧代执行者的
+        # 任何落库写都被拒绝，防止同一任务被两代执行者重复生效（2026-08-28 现场）。
+        existing_job_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(agent_jobs)").fetchall()
+        }
+        if "lease_token" not in existing_job_columns:
+            connection.execute(
+                "ALTER TABLE agent_jobs ADD COLUMN lease_token TEXT NOT NULL DEFAULT ''"
+            )
+
         # adjustment_proposals 表：为「按新参数重新编排」类提案追加 params_json 列，
         # 用于在用户「采纳」时一并落地 examDate/days/dailyHours（「忽略」则参数不落地，保持一致）。
         existing_proposal_columns = {
@@ -500,14 +512,21 @@ def _claim_job() -> dict[str, Any] | None:
     initialize_agent_database()
     now = _now()
     lease_until = (datetime.now() + timedelta(minutes=10)).isoformat(timespec="seconds")
+    lease_token = uuid.uuid4().hex
     with _connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute(
-            "UPDATE agent_jobs SET status = 'queued', lease_until = '' WHERE status = 'running' AND lease_until != '' AND lease_until < ?",
+            "UPDATE agent_jobs SET status = 'queued', lease_until = '', lease_token = '' WHERE status = 'running' AND lease_until != '' AND lease_until < ?",
             (now,),
         )
+        # 同课程互斥：已有该课程 running 任务时不再 claim 该课程的 queued 任务，
+        # 防止维护任务与内容生成在同一课程上并发执行（写 workspace.json 竞争）。
         row = connection.execute(
             "SELECT * FROM agent_jobs WHERE status = 'queued' AND available_at <= ? "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM agent_jobs other"
+            "  WHERE other.status = 'running' AND other.course_id = agent_jobs.course_id"
+            ") "
             "ORDER BY CASE job_type "
             "WHEN 'approve_strategy_documents' THEN 0 "
             "WHEN 'external_source_import' THEN 1 "
@@ -521,8 +540,8 @@ def _claim_job() -> dict[str, Any] | None:
             connection.commit()
             return None
         connection.execute(
-            "UPDATE agent_jobs SET status = 'running', attempts = attempts + 1, lease_until = ?, updated_at = ? WHERE id = ?",
-            (lease_until, now, row["id"]),
+            "UPDATE agent_jobs SET status = 'running', attempts = attempts + 1, lease_until = ?, lease_token = ?, updated_at = ? WHERE id = ?",
+            (lease_until, lease_token, now, row["id"]),
         )
         connection.commit()
     return {
@@ -532,16 +551,26 @@ def _claim_job() -> dict[str, Any] | None:
         "payload": json.loads(row["payload_json"]),
         "attempts": int(row["attempts"]) + 1,
         "maxAttempts": int(row["max_attempts"]),
+        "leaseToken": lease_token,
     }
 
 
-def _complete_job(job_id: str, result: dict[str, Any] | None = None) -> None:
+def _complete_job(job_id: str, result: dict[str, Any] | None = None, *, lease_token: str = "") -> None:
+    # lease_token 校验：job 被 lease 过期回收并二次 claim 后，旧代执行者
+    # 的完成写被拒绝，避免覆盖新一代的结果（token 为空时跳过校验，兼容旧调用）。
     with _connection() as connection:
-        connection.execute(
-            "UPDATE agent_jobs SET status = 'completed', result_json = ?, lease_until = '', updated_at = ? "
-            "WHERE id = ? AND status = 'running'",
-            (json.dumps(result or {}, ensure_ascii=False), _now(), job_id),
-        )
+        if lease_token:
+            connection.execute(
+                "UPDATE agent_jobs SET status = 'completed', result_json = ?, lease_until = '', lease_token = '', updated_at = ? "
+                "WHERE id = ? AND status = 'running' AND lease_token = ?",
+                (json.dumps(result or {}, ensure_ascii=False), _now(), job_id, lease_token),
+            )
+        else:
+            connection.execute(
+                "UPDATE agent_jobs SET status = 'completed', result_json = ?, lease_until = '', updated_at = ? "
+                "WHERE id = ? AND status = 'running'",
+                (json.dumps(result or {}, ensure_ascii=False), _now(), job_id),
+            )
 
 
 def _fail_job(job: dict[str, Any], error: Exception) -> None:
@@ -551,25 +580,61 @@ def _fail_job(job: dict[str, Any], error: Exception) -> None:
     status = "failed" if exhausted else "queued"
     delay_seconds = min(60, 2 ** job["attempts"])
     available_at = (datetime.now() + timedelta(seconds=delay_seconds)).isoformat(timespec="seconds")
+    lease_token = str(job.get("leaseToken", ""))
     with _connection() as connection:
-        connection.execute(
-            "UPDATE agent_jobs SET status = ?, error = ?, available_at = ?, lease_until = '', updated_at = ? WHERE id = ?",
-            (status, str(error), available_at, _now(), job["id"]),
-        )
+        if lease_token:
+            # 代际 fencing：job 已被新一代执行者接管时，旧代的失败写同样被拒绝。
+            connection.execute(
+                "UPDATE agent_jobs SET status = ?, error = ?, available_at = ?, lease_until = '', lease_token = '', updated_at = ? "
+                "WHERE id = ? AND status = 'running' AND lease_token = ?",
+                (status, str(error), available_at, _now(), job["id"], lease_token),
+            )
+        else:
+            connection.execute(
+                "UPDATE agent_jobs SET status = ?, error = ?, available_at = ?, lease_until = '', updated_at = ? WHERE id = ?",
+                (status, str(error), available_at, _now(), job["id"]),
+            )
 
 
-def _renew_job_lease(job_id: str) -> None:
+def _renew_job_lease(job_id: str, *, lease_token: str = "") -> None:
     lease_until = (datetime.now() + timedelta(minutes=10)).isoformat(timespec="seconds")
     with _connection() as connection:
-        connection.execute(
-            "UPDATE agent_jobs SET lease_until = ?, updated_at = ? WHERE id = ? AND status = 'running'",
-            (lease_until, _now(), job_id),
-        )
+        if lease_token:
+            connection.execute(
+                "UPDATE agent_jobs SET lease_until = ?, updated_at = ? WHERE id = ? AND status = 'running' AND lease_token = ?",
+                (lease_until, _now(), job_id, lease_token),
+            )
+        else:
+            connection.execute(
+                "UPDATE agent_jobs SET lease_until = ?, updated_at = ? WHERE id = ? AND status = 'running'",
+                (lease_until, _now(), job_id),
+            )
 
 
-def _lease_heartbeat(job_id: str, stop_event: threading.Event) -> None:
+def has_agent_job_ownership(job_id: str, lease_token: str) -> bool:
+    """当前执行者是否仍持有该 job 的执行权（lease_token 代际一致）。
+
+    供长任务的协作取消点轮询：job 被 lease 过期回收并二次 claim 后，
+    旧代执行者发现失去所有权应主动中止，不再浪费模型调用。
+    """
+    initialize_agent_database()
+    with _connection() as connection:
+        row = connection.execute(
+            "SELECT lease_token FROM agent_jobs WHERE id = ? AND status = 'running'",
+            (job_id,),
+        ).fetchone()
+    return row is not None and str(row["lease_token"]) == lease_token
+
+
+def _lease_heartbeat(job_id: str, stop_event: threading.Event, lease_token: str = "") -> None:
+    # 心跳线程必须永不猝死：一次 SQLite 锁竞争（database is locked）就足以让
+    # lease 过期 → job 被二次 claim → 同一课程双份生成并发执行（2026-08-28 现场）。
+    # 单次续租失败只跳过该轮，下一轮（60s 后）重试。
     while not stop_event.wait(60):
-        _renew_job_lease(job_id)
+        try:
+            _renew_job_lease(job_id, lease_token=lease_token)
+        except sqlite3.Error:
+            continue
 
 
 class AgentJobWorker:
@@ -596,9 +661,10 @@ class AgentJobWorker:
             if job is None:
                 self._stop_event.wait(0.75)
                 continue
+            lease_token = str(job.get("leaseToken", ""))
             heartbeat_stop = threading.Event()
             heartbeat = threading.Thread(
-                target=_lease_heartbeat, args=(job["id"], heartbeat_stop), daemon=True
+                target=_lease_heartbeat, args=(job["id"], heartbeat_stop, lease_token), daemon=True
             )
             heartbeat.start()
             # handler 跑在子线程：Python 无法强杀线程，超时后放弃该线程、
@@ -612,7 +678,11 @@ class AgentJobWorker:
                     handler = self._handlers.get(job["jobType"])
                     if handler is None:
                         raise RuntimeError(f"未注册后台任务处理器：{job['jobType']}")
-                    payload = {**job["payload"], "_jobId": job["id"]}
+                    payload = {
+                        **job["payload"],
+                        "_jobId": job["id"],
+                        "_leaseToken": lease_token,
+                    }
                     result_holder["result"] = handler(job["courseId"], payload)
                 except BaseException as error:  # noqa: BLE001 - 记录后由主循环统一落库
                     error_holder.append(error)
@@ -636,7 +706,7 @@ class AgentJobWorker:
                 elif error_holder:
                     _fail_job(job, error_holder[0])
                 else:
-                    _complete_job(job["id"], result_holder.get("result"))
+                    _complete_job(job["id"], result_holder.get("result"), lease_token=lease_token)
             finally:
                 heartbeat_stop.set()
                 heartbeat.join(timeout=1)

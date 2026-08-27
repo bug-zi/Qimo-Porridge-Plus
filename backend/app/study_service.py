@@ -23,7 +23,7 @@ from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 from zipfile import ZipFile
 
-from .agent_runtime import AgentJobCancelled, create_adjustment_proposal, enqueue_agent_job, is_agent_job_cancelled
+from .agent_runtime import AgentJobCancelled, create_adjustment_proposal, enqueue_agent_job, has_agent_job_ownership, is_agent_job_cancelled
 from .model_usage import model_call_scope, record_call_result, record_call_start
 from .agents import ORIENTATION_TASK_ID, build_orientation_guide, run_content_workflow, run_strategy_workflow, with_structured_formula_rules
 from .agents.tools import apply_operations_to_copy
@@ -2793,6 +2793,7 @@ def approve_strategy_documents(
     continue_generation: bool = False,
     wait_for_generation_lock: bool = False,
     job_id: str = "",
+    lease_token: str = "",
 ) -> dict[str, Any]:
     """Generate the mainline, or fill only missing lesson content in repair mode.
 
@@ -2877,7 +2878,13 @@ def approve_strategy_documents(
                 repair_only=repair_only,
                 lesson_limit=lesson_limit,
                 use_existing_plan=repair_only or continue_generation,
-                should_cancel=(lambda: is_agent_job_cancelled(job_id)) if job_id else None,
+                should_cancel=(
+                    (lambda: is_agent_job_cancelled(job_id) or (
+                        lease_token and not has_agent_job_ownership(job_id, lease_token)
+                    ))
+                    if job_id
+                    else None
+                ),
                 telemetry_job_id=job_id,
             )
             if repair_only or continue_generation:
