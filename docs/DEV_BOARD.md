@@ -19,20 +19,18 @@
 |---|---|
 | 日期 | 2026-08-28 |
 | 分支 | dev |
-| 后端测试 | ✅ 127 passed（2026-08-28） |
+| 后端测试 | ✅ 134 passed / 95.63s（2026-08-28，含阶段1 新增 7 个模型层测试） |
 | 前端 tsc / build | ⚠️ 本轮未跑（本轮无前端代码改动） |
-| 工作区 | 干净（用户调试脚本 inspect_*.py / run_one_lesson.py 未跟踪，归属待确认） |
-| 当前主线 | 阶段0止血 ✅ → 阶段1 AI工作流稳定性改造（下一步） |
-| 架构债提醒 | 模型调用仍为非流式+长超时，勿单纯调小超时（详见 CLAUDE.md） |
+| 工作区 | 用户调试脚本 inspect_*.py / run_one_lesson.py 未跟踪，归属待确认 |
+| 当前主线 | 阶段0止血 ✅ → 阶段1 AI工作流稳定性改造 ✅（待真实上游验证）→ P1 真实课程端到端验收 |
+| 架构债提醒 | 模型调用已改流式+首token超时（30s判死）；剩余架构债见阶段2拆分计划 |
 
 ---
 
 ## 🚧 开发中
 
 - [ ] 前端"生成用量基线"：`App.tsx` 已记录基线、`ModuleView.tsx` 已加 `generationUsageBaseline` 属性定义，但**属性未从 App 传给 ModuleView、未参与增量用量展示**，链路没串完（6c622dd 已提交一半改动，注意 types.ts 已有字段）
-- [ ] 阶段1：模型调用改流式 + 首 token 超时（30s 无首字节判死），随后才可安全降低整包超时 ｜ 依赖：先把模型调用代码抽到独立模块再改
-- [ ] 阶段1：`AgentJobWorker` 增加 job 级硬超时，保证队列永不永久卡死
-- [ ] 阶段1：模型调用层补 fake-provider 单测（静默挂起/慢响应/掐连接/429 四种场景锁定重试、熔断、failover 行为）
+- [ ] P1 验收：阶段1 流式改造需用真实上游验证（真实课程生成一轮，观察首 token 超时与 failover 是否按预期工作）
 
 ## 📋 计划中
 
@@ -63,16 +61,19 @@
 
 ## 🧪 待测试
 
-- [ ] `npm run build`：待下次有前端改动时执行；历史上 Vite/Rolldown 出过 2000+ modules 后 Windows 原生退出，需留意
+- [ ] `npm run build`：2026-08-28 复现 Vite/Rolldown 在 2265 modules 后 Windows 原生退出 `0xC0000409`；tsc 独立通过，待定位原生构建崩溃
 
 ## 🐛 Bug 跟踪
 
-- [ ] [高] AI 生成队列偶发卡死：单线程 worker + 非流式长超时 + 上游静默挂起 → 最坏单次调用阻塞约 1 小时 ｜ 根因=架构，解法=🚧 中的流式改造，非调参可解
-- [ ] [中] 请求超时/挂起误判：300s 超时会误杀思考型模型正常慢请求（5-8 分钟静默）｜ 同上由流式+首token超时解决
+- [ ] [中] Vite/Rolldown 生产构建在 Windows 转换 2265 modules 后原生退出 `0xC0000409`，无 JS 堆栈；tsc 正常 ｜ 已复现，待独立定位
 - [ ] [低] `routers/__init__.py` 有 UTF-8 BOM，脚本读取需 `utf-8-sig` ｜ 待顺手清理
+- [x] 2026-08-28 关闭（已由阶段1 解决）：[高] AI 生成队列偶发卡死（非流式长超时+上游静默挂起）——流式+30s 首 token 超时+job 级 2h 硬超时三重防线
+- [x] 2026-08-28 关闭（已由阶段1 解决）：[中] 请求超时/挂起误判（300s 误杀思考型慢请求）——首 token 超时只判死真挂起，读流阶段不再误杀
 
 ## ✅ 已完成（最近）
 
+- [x] 2026-08-28 阶段1 AI工作流稳定性改造完成（4 个提交）：model_client.py 抽取（b3c19e6）→ 流式+30s 首 token 超时（5fe4a13）→ job 级 2h 硬超时（c6c79cb）→ fake-provider 单测 ×7（317f71b）；全量 134 passed
+- [x] 2026-08-28 真实课程 `course-1787678599479` 经持久队列增量生成严格一课：workspace `studyGuide` 5→6；任务 `task-d1-04-runtime-modes-interrupts`、8 道练习可用；job `job-ecceb24a35c244c68ea4268e1e1bf5eb` completed
 - [x] 2026-08-28 阶段0止血完成：2 个失败测试修复（全量 127 passed）、CLAUDE.md/AGENTS.md 约束文件、本看板建立；工作区改动经用户以 6c622dd 提交
 - [x] 2026-08-28 修复 2 个失败测试（test_mainline_generation_repair.py）：handler 契约要求返回 workspace，更新测试替身并补完成度断言，全量 127 passed
 - [x] 8c27763 备用模型 + 故障切换、故事版优化、Token 用量展示
@@ -81,6 +82,11 @@
 
 | 日期 | 内容 | 结果 |
 |---|---|---|
+| 2026-08-28 | 后端全量 pytest（阶段1完成后，含新增 test_model_client ×7） | ✅ 134 passed / 95.63s |
+| 2026-08-28 | 阶段1 各步完成后全量 pytest（×3） | ✅ 127 passed（每步） |
+| 2026-08-28 | 真实课程下一课生成验收 | ✅ studyGuide 5→6；目标任务 + 8 道练习；持久 job completed |
+| 2026-08-28 | 前端 `pnpm exec tsc -b` / `pnpm run build` | ✅ tsc；❌ Vite 2265 modules 后原生退出 0xC0000409 |
+| 2026-08-28 | 后端全量 pytest（生成验收后） | ✅ 127 passed / 15.60s |
 | 2026-08-28 | 后端全量 pytest（修复测试后） | ✅ 127 passed / 17s |
 | 2026-08-28 | 后端全量 pytest（修复前） | ❌ 2 failed（test_mainline_generation_repair） |
 
@@ -88,8 +94,11 @@
 
 | 日期 | commit | 说明 |
 |---|---|---|
-| 2026-08-28 | —（本轮待提交） | test: 修复 background_generation 测试替身契约；docs: CLAUDE.md/AGENTS.md 约束 + DEV_BOARD 看板 |
-| 2026-08-28 | 6c622dd | 模型用量 scope 化抽取（model_usage.py，仅完成 agent_runtime/content_workflow 接线）、HANDOVER/V1方案更新、数学女孩借鉴文档（用户提交） |
+| 2026-08-28 | 317f71b | test: fake-provider 单测锁定流式/超时/重试/failover（阶段1-4，7 个新测试） |
+| 2026-08-28 | c6c79cb | feat(queue): AgentJobWorker job 级 2h 硬超时（阶段1-3） |
+| 2026-08-28 | 5fe4a13 | feat(model): 流式 + 30s 首 token 超时（阶段1-2，解决思考/挂起无法区分的死结） |
+| 2026-08-28 | b3c19e6 | refactor(model): 抽取模型调用层到 model_client.py（阶段1-1，study_service 5905→5170 行） |
+| 2026-08-28 | 86fc678 | docs: 建立 AI 协作约束与实时开发看板 |
 | 2026-08-28 | 8c27763 | 备用模型故障切换、故事版优化、Token 用量展示（大杂烩提交，教训见 CLAUDE.md） |
 | 2026-08-27 | 7a773b4 | 复习总计划 prompt、课程故事风格、Agent 模块化等大整合（大杂烩提交） |
 
