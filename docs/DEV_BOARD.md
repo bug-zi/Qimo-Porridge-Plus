@@ -19,11 +19,11 @@
 |---|---|
 | 日期 | 2026-08-28 |
 | 分支 | dev |
-| 后端测试 | ✅ 134 passed / 95.63s（2026-08-28，含阶段1 新增 7 个模型层测试） |
+| 后端测试 | ✅ 138 passed / 96s（2026-08-28，含队列 fencing 新增 4 测试） |
 | 前端 tsc / build | ⚠️ 本轮未跑（本轮无前端代码改动） |
 | 工作区 | 用户调试脚本 inspect_*.py / run_one_lesson.py 未跟踪，归属待确认 |
-| 当前主线 | 阶段0止血 ✅ → 阶段1 AI工作流稳定性改造 ✅（待真实上游验证）→ P1 真实课程端到端验收 |
-| 架构债提醒 | 模型调用已改流式+首token超时（30s判死）；剩余架构债见阶段2拆分计划 |
+| 当前主线 | 阶段0止血 ✅ → 阶段1 AI工作流稳定性 ✅（真实上游已验证）→ 队列双重执行修复 ✅ → 阶段2 拆分 study_service |
+| 架构债提醒 | uvicorn --reload 在中文路径下失效（改代码不重启），修复需手动重启后端 |
 
 ---
 
@@ -61,17 +61,22 @@
 
 ## 🧪 待测试
 
+- [ ] 队列 fencing 修复需重启后端后真实生成一轮验证（--reload 失效，当前 8000 端口服务仍是旧代码）：观察 job attempts 是否不再出现 2、同课程 job 不再并行 running
 - [ ] `npm run build`：2026-08-28 复现 Vite/Rolldown 在 2265 modules 后 Windows 原生退出 `0xC0000409`；tsc 独立通过，待定位原生构建崩溃
 
 ## 🐛 Bug 跟踪
 
 - [ ] [中] Vite/Rolldown 生产构建在 Windows 转换 2265 modules 后原生退出 `0xC0000409`，无 JS 堆栈；tsc 正常 ｜ 已复现，待独立定位
+- [ ] [中] uvicorn `--reload` 在中文路径下不生效（改代码不重启进程），开发期修改后端代码可能跑的是旧代码 ｜ 2026-08-28 实测发现（03:07 改 agent_runtime.py 服务未重启）｜ 待定位：考虑 watchfiles 路径兼容或改用显式重启脚本
 - [ ] [低] `routers/__init__.py` 有 UTF-8 BOM，脚本读取需 `utf-8-sig` ｜ 待顺手清理
+- [x] 2026-08-28 关闭（132e3e1 修复）：[高] agent 队列双重执行——心跳线程偶发猝死（SQLite 锁竞争无保护）→ lease 过期 → job 被二次 claim → 同一课程双份生成并发。修复三件套：心跳 try/except 保护、lease_token 代际 fencing（旧代完成/失败/续租写全被拒）、同课程 running 互斥（NOT EXISTS 子查询）+ has_agent_job_ownership 协作取消点接入 content_workflow
 - [x] 2026-08-28 关闭（已由阶段1 解决）：[高] AI 生成队列偶发卡死（非流式长超时+上游静默挂起）——流式+30s 首 token 超时+job 级 2h 硬超时三重防线
 - [x] 2026-08-28 关闭（已由阶段1 解决）：[中] 请求超时/挂起误判（300s 误杀思考型慢请求）——首 token 超时只判死真挂起，读流阶段不再误杀
 
 ## ✅ 已完成（最近）
 
+- [x] 2026-08-28 修复 agent 队列双重执行（132e3e1）：现场实锤心跳猝死→lease 过期→二次 claim→同课程双份生成；fencing token + 心跳保护 + 同课程互斥三件套，138 passed
+- [x] 2026-08-28 阶段1 真实上游验证通过：课程 course-1787678599479 增量生成第 7 课 task-d7-03-file-operations（13060 字 guide），job completed，流式+首 token 超时在真实模型下工作正常
 - [x] 2026-08-28 阶段1 AI工作流稳定性改造完成（4 个提交）：model_client.py 抽取（b3c19e6）→ 流式+30s 首 token 超时（5fe4a13）→ job 级 2h 硬超时（c6c79cb）→ fake-provider 单测 ×7（317f71b）；全量 134 passed
 - [x] 2026-08-28 真实课程 `course-1787678599479` 经持久队列增量生成严格一课：workspace `studyGuide` 5→6；任务 `task-d1-04-runtime-modes-interrupts`、8 道练习可用；job `job-ecceb24a35c244c68ea4268e1e1bf5eb` completed
 - [x] 2026-08-28 阶段0止血完成：2 个失败测试修复（全量 127 passed）、CLAUDE.md/AGENTS.md 约束文件、本看板建立；工作区改动经用户以 6c622dd 提交
@@ -82,6 +87,8 @@
 
 | 日期 | 内容 | 结果 |
 |---|---|---|
+| 2026-08-28 | 后端全量 pytest（队列 fencing 修复后，含新增 ×4） | ✅ 138 passed / 96s |
+| 2026-08-28 | 真实上游增量生成监控（job-0d929645，approve attempt 1→2 双执行现场） | ✅ completed；第 7 课产出 13060 字；bug 现场已捕获并修复 |
 | 2026-08-28 | 后端全量 pytest（阶段1完成后，含新增 test_model_client ×7） | ✅ 134 passed / 95.63s |
 | 2026-08-28 | 阶段1 各步完成后全量 pytest（×3） | ✅ 127 passed（每步） |
 | 2026-08-28 | 真实课程下一课生成验收 | ✅ studyGuide 5→6；目标任务 + 8 道练习；持久 job completed |
@@ -94,6 +101,8 @@
 
 | 日期 | commit | 说明 |
 |---|---|---|
+| 2026-08-28 | 132e3e1 | fix(queue): lease 代际 fencing + 心跳保护 + 同课程互斥，杜绝双重生成 |
+| 2026-08-28 | d3fdc3c | docs: 看板更新——阶段1 完成、134 passed、卡死/误杀两条 Bug 关闭 |
 | 2026-08-28 | 317f71b | test: fake-provider 单测锁定流式/超时/重试/failover（阶段1-4，7 个新测试） |
 | 2026-08-28 | c6c79cb | feat(queue): AgentJobWorker job 级 2h 硬超时（阶段1-3） |
 | 2026-08-28 | 5fe4a13 | feat(model): 流式 + 30s 首 token 超时（阶段1-2，解决思考/挂起无法区分的死结） |
