@@ -139,9 +139,18 @@ def test_background_generation_waits_for_shared_content_lock(monkeypatch):
 
     def fake_approve(*args, **kwargs):
         received.update(kwargs)
+        # handler 契约要求返回 workspace 用于汇报课程完成度：
+        # orientation 任务不计入课时；1 课已完成、1 课待生成。
+        return {
+            "tasks": [
+                {"id": "orientation", "kind": "orientation", "studyGuide": {}},
+                {"id": "task-done", "studyGuide": {"examPoints": []}},
+                {"id": "task-pending"},
+            ]
+        }
 
     monkeypatch.setattr(main, "approve_strategy_documents", fake_approve)
-    main._approve_strategy_documents_job(
+    result = main._approve_strategy_documents_job(
         "course-1",
         {
             "reviewPlan": "plan",
@@ -157,6 +166,11 @@ def test_background_generation_waits_for_shared_content_lock(monkeypatch):
     assert received["lesson_limit"] is None
     assert received["continue_generation"] is False
     assert received["wait_for_generation_lock"] is True
+    assert result["completedLessonCount"] == 1
+    assert result["pendingLessonCount"] == 1
+    assert result["contentComplete"] is False
+    assert result["partial"] is True
+    assert result["requestedLessonLimit"] is None
 
 
 def test_background_generation_forwards_incremental_batch(monkeypatch):
@@ -164,9 +178,17 @@ def test_background_generation_forwards_incremental_batch(monkeypatch):
 
     def fake_approve(*args, **kwargs):
         received.update(kwargs)
+        # 同上：handler 需要读取 workspace 中的 tasks 汇报完成度。
+        return {
+            "tasks": [
+                {"id": "task-1", "studyGuide": {"examPoints": []}},
+                {"id": "task-2", "studyGuide": {"examPoints": []}},
+                {"id": "task-3", "studyGuide": {"examPoints": []}},
+            ]
+        }
 
     monkeypatch.setattr(main, "approve_strategy_documents", fake_approve)
-    main._approve_strategy_documents_job(
+    result = main._approve_strategy_documents_job(
         "course-1",
         {
             "reviewPlan": "plan",
@@ -182,6 +204,11 @@ def test_background_generation_forwards_incremental_batch(monkeypatch):
     assert received["generation_mode"] == "incremental"
     assert received["lesson_limit"] == 3
     assert received["continue_generation"] is True
+    assert result["completedLessonCount"] == 3
+    assert result["pendingLessonCount"] == 0
+    assert result["contentComplete"] is True
+    assert result["partial"] is False
+    assert result["requestedLessonLimit"] == 3
 
 
 def test_generation_request_validates_incremental_fields():
