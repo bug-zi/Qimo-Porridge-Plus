@@ -24,6 +24,7 @@ from xml.etree import ElementTree
 from zipfile import ZipFile
 
 from .agent_runtime import AgentJobCancelled, create_adjustment_proposal, enqueue_agent_job, is_agent_job_cancelled
+from .model_usage import model_call_scope, record_call_result, record_call_start
 from .agents import ORIENTATION_TASK_ID, build_orientation_guide, run_content_workflow, run_strategy_workflow, with_structured_formula_rules
 from .agents.tools import apply_operations_to_copy
 from .agents.tutor import run_tutor_agent, run_tutor_agent_stream
@@ -880,11 +881,13 @@ def _request_model_json(request: Request, operation: str, *, deadline: float | N
             except Exception:
                 body_model = ""
             _record_model_call_start(body_model)
+            record_call_start(body_model)
             with urlopen(request, timeout=MODEL_REQUEST_TIMEOUT_SECONDS) as response:
                 data = json.loads(response.read().decode("utf-8"))
             if not isinstance(data, dict):
                 raise RuntimeError(f"{operation}返回格式无效")
             _record_model_usage(data, body_model)
+            record_call_result(data, body_model)
             return data
         except HTTPError as error:
             last_error = error
@@ -945,6 +948,7 @@ def _model_completion(
             # 主模型（含其内部重试预算）整体失败 → 记录熔断计数并改投下一个 provider。
             _note_provider_result(provider["role"], False)
             _record_model_usage({}, provider["model"], failed=True)
+            record_call_result({}, provider["model"], failed=True)
             errors.append(f"{provider['role']}({provider['model']}): {error}")
             continue
         _note_provider_result(provider["role"], True)
@@ -990,6 +994,7 @@ def _model_agent_turn(messages: list[dict[str, Any]], tools: list[dict[str, Any]
         except RuntimeError as error:
             _note_provider_result(provider["role"], False)
             _record_model_usage({}, provider["model"], failed=True)
+            record_call_result({}, provider["model"], failed=True)
             errors.append(f"{provider['role']}({provider['model']}): {error}")
             continue
         _note_provider_result(provider["role"], True)
@@ -3514,6 +3519,7 @@ def approve_strategy_documents(
                 lesson_limit=lesson_limit,
                 use_existing_plan=repair_only or continue_generation,
                 should_cancel=(lambda: is_agent_job_cancelled(job_id)) if job_id else None,
+                telemetry_job_id=job_id,
             )
             if repair_only or continue_generation:
                 # Incremental generation can run while the learner keeps studying.

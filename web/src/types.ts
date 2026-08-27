@@ -631,6 +631,7 @@ export type AgentJob = {
   maxAttempts: number
   error: string
   result: Record<string, unknown>
+  modelUsage?: { calls: number; failures: number; promptTokens: number; completionTokens: number; totalTokens: number; currentCall: { model: string; startedAt: string; stage?: string; taskId?: string; attempt?: number }; stages?: Record<string, { calls: number; failures: number; promptTokens: number; completionTokens: number; totalTokens: number }> } | null
   createdAt: string
   updatedAt: string
 }

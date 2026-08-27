@@ -5,6 +5,7 @@ import re
 import sqlite3
 import threading
 import uuid
+from .model_usage import get_scoped_model_usage
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -476,6 +477,7 @@ def get_agent_job(job_id: str) -> dict[str, Any]:
         "maxAttempts": int(row["max_attempts"]),
         "error": str(row["error"]),
         "result": json.loads(row["result_json"]),
+        "modelUsage": get_scoped_model_usage(str(row["id"])),
         "createdAt": str(row["created_at"]),
         "updatedAt": str(row["updated_at"]),
     }

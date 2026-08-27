@@ -36,6 +36,7 @@ from ..agent_runtime import (
     save_artifact,
 )
 from ..course_style_templates import course_style_prompt_context
+from ..model_usage import model_call_scope
 from ..knowledge_service import retrieve_material_context
 
 
@@ -51,6 +52,7 @@ def run_content_workflow(
     lesson_limit: int | None = None,
     use_existing_plan: bool = False,
     should_cancel: Callable[[], bool] | None = None,
+    telemetry_job_id: str = "",
 ) -> dict[str, Any]:
     run_id = create_agent_run(course_id, "content_generation", {"revision": workspace.get("revision", 0)})
     expected_days = int(workspace.get("onboarding", {}).get("days", 1))
@@ -65,6 +67,12 @@ def run_content_workflow(
     def check_cancelled() -> None:
         if should_cancel and should_cancel():
             raise AgentJobCancelled("用户已结束修复生成")
+
+    def scoped_model_json(stage: str, task_id: str = "") -> JsonModelCall:
+        def call(task_prompt: str, user_content: str, scoped_course_prompt: str = "") -> dict[str, Any]:
+            with model_call_scope(job_id=telemetry_job_id, run_id=run_id, stage=stage, task_id=task_id):
+                return model_json(task_prompt, user_content, scoped_course_prompt)
+        return call
 
     planner_prompt = CONTENT_PLANNER_PROMPT
     mock_prompt = MOCK_EXAM_PROMPT
@@ -187,7 +195,7 @@ def run_content_workflow(
             review_plan=review_plan,
             course_prompt=course_prompt,
             evidence_context=evidence_context,
-            model_json=model_json,
+            model_json=scoped_model_json("lesson", ""),
             run_id=run_id,
             content_style=content_style,
             style_contract=style_contract,
@@ -444,9 +452,11 @@ def run_content_workflow(
             artifact_status = "approved"
         # 第0天·复习导引：校验通过后确定性注入（planner 契约不含 kind 字段，
         # 重复生成/修复生成靠 kind 判重保证幂等）。
-        if not any(isinstance(t, dict) and str(t.get("kind", "")) == "orientation" for t in tasks):
+        # 增量首批只生成选中的正式课程；复习导引属于整门课级内容，
+        # 不应阻塞“生成第 1 课”。在生成剩余全部课程时再补齐。
+        if lesson_limit is None and not any(isinstance(t, dict) and str(t.get("kind", "")) == "orientation" for t in tasks):
             orientation_guide, orientation_degraded = build_orientation_guide(
-                model_json,
+                scoped_model_json("orientation"),
                 course_id=course_id,
                 course=workspace.get("course", {}),
                 onboarding=workspace.get("onboarding", {}),
