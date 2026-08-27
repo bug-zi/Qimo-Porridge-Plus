@@ -70,7 +70,6 @@ COURSE_STYLE_TEMPLATES: dict[CourseContentStyle, CourseStyleTemplate] = {
         version=3,
         teaching_rules=(
             "采用一条连续、生活化的故事主线，让人物行动自然制造问题、展示条件变化、暴露误区并推动应用。",
-            "故事只服务知识理解；删除无关情节、心理铺陈和支线，技术准确性始终高于故事效果。",
             "类比必须与当前概念结构准确对应，并在同段或紧邻段落落回标准术语；同一课程尽量不切换比喻体系。",
         ),
         question_rules=(
