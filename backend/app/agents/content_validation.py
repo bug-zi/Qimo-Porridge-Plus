@@ -12,6 +12,64 @@ _GENERIC_GUIDE_PHRASES = (
 )
 
 
+def _story_event_matches(reference: str, main_event: str) -> bool:
+    """storyEventRef 与 mainEvent 的相关性判断（放宽版）。
+
+    原实现要求两个长句逐字符相等，模型几乎无法复述一致，是讲义反复重生成
+    并最终落入降级模板的主要诱因。现在改为：完全相等直接通过；否则比较
+    两者去标点后的字符二元组（bigram）重叠度——共享至少 3 个二元组且重叠
+    率不低于 30% 即视为引用了同一贯穿事件。
+    """
+    if reference == main_event:
+        return True
+
+    def _bigrams(text: str) -> set[str]:
+        cleaned = "".join(ch for ch in text if ch.isalnum())
+        if not cleaned:
+            return set()
+        if len(cleaned) == 1:
+            return {cleaned}
+        return {cleaned[i : i + 2] for i in range(len(cleaned) - 1)}
+
+    reference_grams = _bigrams(reference)
+    event_grams = _bigrams(main_event)
+    if not reference_grams or not event_grams:
+        return False
+    overlap = len(reference_grams & event_grams)
+    return overlap >= 3 and overlap / min(len(reference_grams), len(event_grams)) >= 0.3
+
+
+# 软伤特征：这些 issue 反映的是数量/顺序/措辞层面的偏差，不影响内容可用性。
+# 重试后仍只剩软伤时，应接受模型稿而不是丢弃换成零信息的降级模板。
+_SOFT_GUIDE_ISSUE_MARKERS = (
+    "顺序包含全部四节",       # #10 四节顺序/多余节
+    "3至8个问题式或事件式",   # #18 beats 数量
+    "2至4道独立变式",         # #22 例题总数
+    "1主例题+2至4独立变式",   # #23 主例/变式结构
+    "mainEvent 不一致",       # #27 storyEventRef 措辞差异
+    "最多5个承上启下问题",    # 01 问题数量
+    "背景引导过长",           # 01 叙事超长
+    "缺少训练判断方法总结",   # 03 methodSummary（可由02兜底展示）
+    "没有说明04转为独立作答", # transitionToSelfCheck 措辞缺失
+)
+
+
+def split_guide_issues(issues: list[str]) -> tuple[list[str], list[str]]:
+    """把校验 issue 拆成（硬伤, 软伤）。
+
+    硬伤 = 结构/内容缺失（缺 storyContext、缺考点、正文为空、缺自测覆盖等），
+    模型稿不可用；软伤 = 数量、顺序、措辞类偏差，模型稿仍然可用。
+    """
+    blocking: list[str] = []
+    soft: list[str] = []
+    for issue in issues:
+        if any(marker in issue for marker in _SOFT_GUIDE_ISSUE_MARKERS):
+            soft.append(issue)
+        else:
+            blocking.append(issue)
+    return blocking, soft
+
+
 def _study_guide_issues(
     task: dict[str, Any],
     practice_by_id: dict[str, dict[str, Any]],
@@ -58,8 +116,11 @@ def _study_guide_issues(
             issues.append(f"任务 {task_id} 缺少故事章节 sections")
         else:
             actual_kinds = tuple(str(section.get("kind")) for section in story_sections if isinstance(section, dict))
-            if len(story_sections) != 4 or actual_kinds != expected_kinds:
-                issues.append(f"任务 {task_id} 的故事章节必须恰好按 preparation、explanation、examples、self-check 排列")
+            ordered_expected = tuple(kind for kind in actual_kinds if kind in expected_kinds)
+            if ordered_expected != expected_kinds:
+                # 放宽：不再要求“恰好4节且无多余”，只要求四节齐全且相对顺序正确；
+                # 数量/多余节属于软偏差，不再触发整包重生成。
+                issues.append(f"任务 {task_id} 的故事章节必须按 preparation、explanation、examples、self-check 顺序包含全部四节")
             by_kind = {str(section.get("kind")): section for section in story_sections if isinstance(section, dict)}
             for kind in expected_kinds:
                 section = by_kind.get(kind)
@@ -72,19 +133,21 @@ def _study_guide_issues(
             examples_section = by_kind.get("examples", {})
             if isinstance(preparation_section, dict):
                 questions = preparation_section.get("questions")
-                if isinstance(questions, list) and len(questions) > 1:
-                    issues.append(f"任务 {task_id} 的01课前准备只能有最多1个承上启下问题")
+                if isinstance(questions, list) and len(questions) > 5:
+                    issues.append(f"任务 {task_id} 的01课前准备最多5个承上启下问题")
                 terms = preparation_section.get("terms")
                 if not isinstance(terms, list) or not terms:
                     issues.append(f"任务 {task_id} 的01课前准备缺少本节关键词解释")
-                elif any(not isinstance(term, dict) or not str(term.get("term", "")).strip() or not str(term.get("meaning", "")).strip() or not str(term.get("role", "")).strip() for term in terms):
-                    issues.append(f"任务 {task_id} 的01关键词必须逐个包含 term、meaning 和 role")
-                if len(str(preparation_section.get("narrative", ""))) > 1000:
+                elif any(not isinstance(term, dict) or not str(term.get("term", "")).strip() or not str(term.get("meaning", "")).strip() for term in terms):
+                    # 放宽：role（及 storyMapping）缺省视为软偏差，只强制 term 与 meaning。
+                    issues.append(f"任务 {task_id} 的01关键词必须逐个包含 term 和 meaning")
+                if len(str(preparation_section.get("narrative", ""))) > 1500:
                     issues.append(f"任务 {task_id} 的01背景引导过长并侵占正式讲解职责")
             if isinstance(explanation_section, dict):
                 beats = explanation_section.get("explanationBeats")
-                if not isinstance(beats, list) or not 4 <= len(beats) <= 7:
-                    issues.append(f"任务 {task_id} 的02讲解必须包含4至7个问题式或事件式 explanationBeats")
+                if not isinstance(beats, list) or not 3 <= len(beats) <= 8:
+                    # 放宽：4至7 → 3至8，数量偏差不再轻易触发整包重生成。
+                    issues.append(f"任务 {task_id} 的02讲解必须包含3至8个问题式或事件式 explanationBeats")
                 elif any(not isinstance(beat, dict) or not str(beat.get("heading", "")).strip() or not str(beat.get("body", "")).strip() or not str(beat.get("conclusion", "")).strip() for beat in beats):
                     issues.append(f"任务 {task_id} 的02每个讲解标题必须包含 heading、body 和 conclusion")
                 if not isinstance(explanation_section.get("methodSummary"), list) or not explanation_section.get("methodSummary"):
@@ -93,12 +156,13 @@ def _study_guide_issues(
                     issues.append(f"任务 {task_id} 的02结尾没有自然引出03例题")
             if isinstance(examples_section, dict):
                 examples = examples_section.get("workedExamples")
-                if not isinstance(examples, list) or not 3 <= len(examples) <= 4:
-                    issues.append(f"任务 {task_id} 的03必须包含1个主故事综合例题和2至3道独立变式")
+                if not isinstance(examples, list) or not 3 <= len(examples) <= 5:
+                    issues.append(f"任务 {task_id} 的03必须包含1个主故事综合例题和2至4道独立变式")
                 else:
                     variants = [example for example in examples if isinstance(example, dict) and example.get("independentVariant") is True]
-                    if len(variants) not in {2, 3} or len(examples) - len(variants) != 1:
-                        issues.append(f"任务 {task_id} 的03例题结构必须严格为1主例题+2至3独立变式")
+                    # 放宽：独立变式允许 2 至 4 道；仍要求恰好 1 个主例题（非变式）。
+                    if len(variants) not in {2, 3, 4} or len(examples) - len(variants) != 1:
+                        issues.append(f"任务 {task_id} 的03例题结构必须为1主例题+2至4独立变式")
                 if not isinstance(examples_section.get("methodSummary"), list) or not examples_section.get("methodSummary"):
                     issues.append(f"任务 {task_id} 的03结尾缺少训练判断方法总结")
                 if not str(examples_section.get("transitionToSelfCheck", "")).strip():
@@ -106,7 +170,7 @@ def _study_guide_issues(
                 story_event_ref = str(examples_section.get("storyEventRef", "")).strip()
                 if not story_event_ref:
                     issues.append(f"任务 {task_id} 的主例题没有引用贯穿事件")
-                elif story_event_ref != str(story_context.get("mainEvent", "")).strip():
+                elif not _story_event_matches(story_event_ref, str(story_context.get("mainEvent", "")).strip()):
                     issues.append(f"任务 {task_id} 的主例题引用与 mainEvent 不一致")
 
     elif guide.get("storyContext") is not None:

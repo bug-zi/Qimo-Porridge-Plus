@@ -7,9 +7,8 @@ from typing import Any
 
 from .checkpoint_contracts import lesson_content_signature, lesson_guide_signature, lesson_questions_signature
 from .content_prompts import LESSON_CONTENT_PROMPT, LESSON_PRACTICE_PROMPT
-from .content_validation import _study_guide_issues
+from .content_validation import _study_guide_issues, split_guide_issues
 from .contracts import ReviewReport
-from .lesson_fallbacks import _backup_practice_questions, _backup_study_guide
 from .question_generation import _question_issues, _shuffle_single_choice_options, _strong_feedback_issues
 from .readability_review import attach_readability_review
 from .workflow_types import JsonModelCall
@@ -100,7 +99,8 @@ class LessonBuilder:
                 cached_issues = _study_guide_issues({**task, "_contentStyle": self.content_style, "studyGuide": cached_guide}, cached_practice_by_id)
                 cached_issues.extend(_strong_feedback_issues(cached_guide, self.strong_feedback_directives))
                 cached_issues.extend(_question_issues(cached_questions, collection=f"任务 {task_id} 自测题"))
-                if not cached_issues:
+                # 缓存复用同样只看硬伤：只剩软伤（数量/顺序/措辞）的检查点视为可用。
+                if not split_guide_issues(cached_issues)[0]:
                     attach_readability_review({**task, "studyGuide": cached_guide}, self.content_style)
                     return task_id, cached_guide, cached_questions, ReviewReport(
                         passed=True,
@@ -141,7 +141,7 @@ class LessonBuilder:
         guide_artifact_type = f"lesson_guide_checkpoint:{task_id}"
         guide_signature = lesson_guide_signature(lesson_signature)
         
-        def generate_guide(review_issues: list[str] | None = None) -> tuple[dict[str, Any], list[str]]:
+        def generate_guide(review_issues: list[str] | None = None, attempt: int = 1) -> tuple[dict[str, Any], list[str]]:
             payload = lesson_input if not review_issues else {**lesson_input, "reviewIssues": review_issues}
             prompt = LESSON_CONTENT_PROMPT if not review_issues else LESSON_CONTENT_PROMPT + "\n请修复 reviewIssues 中的全部问题。"
             result = self.model_json(prompt, json.dumps(payload, ensure_ascii=False), self.course_prompt)
@@ -153,7 +153,29 @@ class LessonBuilder:
                 require_self_test=False,
             )
             issues.extend(_strong_feedback_issues(guide, self.strong_feedback_directives))
-            return guide, list(dict.fromkeys(issues))
+            deduped_issues = list(dict.fromkeys(issues))
+            if deduped_issues:
+                # 失败原稿落盘：保留模型原始输出与触发它的校验问题，保证事后
+                # 可以回放“模型到底写了什么、挂在哪条校验上”，而不是凭空丢弃
+                # 数分钟的模型产出。每次尝试新增一个 version，不覆盖历史。
+                try:
+                    self.deps.save_artifact(
+                        self.course_id,
+                        f"lesson_guide_failed:{task_id}",
+                        {
+                            "attempt": attempt,
+                            "stage": "repair" if review_issues else "initial",
+                            "inputReviewIssues": review_issues or [],
+                            "issues": deduped_issues,
+                            "modelOutput": result,
+                        },
+                        status="failed",
+                        source_run_id=self.run_id,
+                    )
+                except Exception:
+                    # 落盘失败只损失可观测性，不影响生成主流程。
+                    pass
+            return guide, deduped_issues
         
         cached_guide_artifact = self.deps.get_latest_artifact(self.course_id, guide_artifact_type)
         cached_guide_content = cached_guide_artifact.get("content", {}) if cached_guide_artifact else {}
@@ -163,29 +185,26 @@ class LessonBuilder:
             if isinstance(guide, dict)
             else ["讲义检查点不可用"]
         )
-        guide_from_backup = False
+        soft_guide_issues: list[str] = []
         if guide_issues:
-            guide, guide_issues = generate_guide()
-            if guide_issues:
-                guide, guide_issues = generate_guide(guide_issues)
-            if guide_issues:
-                # 模型两次仍未产出合规讲义 → 确定性降级讲义兜底（同 _backup_mock_questions），
-                # 保证学习单元始终有内容，而不是空着只打 contentQualityWarning。
-                backup_guide = _backup_study_guide(task, lesson_input)
-                backup_issues = _study_guide_issues(
-                    {**task, "_contentStyle": self.content_style, "studyGuide": backup_guide}, {}, require_self_test=False
+            guide, guide_issues = generate_guide(attempt=1)
+            guide_blocking, soft_guide_issues = split_guide_issues(guide_issues)
+            if guide_blocking:
+                # 只把硬伤反馈给第二次尝试；软伤不再触发重生成。
+                guide, guide_issues = generate_guide(guide_blocking, attempt=2)
+                guide_blocking, soft_guide_issues = split_guide_issues(guide_issues)
+            if guide_blocking:
+                # 按用户决策移除降级模板：模型两次仍有硬伤（结构/内容缺失）时直接失败，
+                # 由上层标记该课“尚未完整生成”，任务保持无 studyGuide，下一轮自动重试模型。
+                # 失败原稿已由 generate_guide 落盘到 lesson_guide_failed:{task_id}，可回放诊断。
+                raise ValueError(
+                    f"任务 {task_id} 讲义连续两次未通过硬校验：" + "；".join(guide_blocking[:5])
                 )
-                if backup_issues:
-                    raise ValueError(
-                        f"任务 {task_id} 讲义降级模板仍不合规：" + "；".join(backup_issues[:5])
-                    )
-                guide = backup_guide
-                guide_from_backup = True
             else:
                 self.deps.save_artifact(
                     self.course_id,
                     guide_artifact_type,
-                    {"signature": guide_signature, "studyGuide": guide},
+                    {"signature": guide_signature, "studyGuide": guide, "softIssues": soft_guide_issues},
                     status="checkpoint",
                     source_run_id=self.run_id,
                 )
@@ -237,28 +256,20 @@ class LessonBuilder:
             question_issues.extend(_study_guide_issues({**task, "_contentStyle": self.content_style, "studyGuide": guide}, practice_by_id))
         else:
             question_issues = ["自测题检查点不可用"]
-        questions_from_backup = False
-        if question_issues:
+        # 与讲义同样的硬伤/软伤区分：故事数量/措辞类软伤不构成丢弃模型自测题的理由。
+        question_blocking, soft_question_issues = split_guide_issues(question_issues)
+        if question_blocking:
             questions, question_issues = generate_questions()
-            if question_issues:
-                questions, question_issues = generate_questions(question_issues)
-            if question_issues:
-                # 模型两次仍未产出合规自测 → 降级题兜底（每考点一道单选），
-                # 由 normalize_practice_questions 回填 selfTestQuestionIds，保证考点覆盖校验通过。
-                backup_questions = normalize_practice_questions(_backup_practice_questions(task, guide), guide)
-                backup_by_id = {
-                    str(question.get("id")): question
-                    for question in backup_questions
-                    if isinstance(question, dict) and question.get("id")
-                }
-                backup_q_issues = _question_issues(backup_questions, collection=f"任务 {task_id} 自测题")
-                backup_q_issues.extend(_study_guide_issues({**task, "_contentStyle": self.content_style, "studyGuide": guide}, backup_by_id))
-                if backup_q_issues:
-                    raise ValueError(
-                        f"任务 {task_id} 自测降级模板仍不合规：" + "；".join(backup_q_issues[:5])
-                    )
-                questions = backup_questions
-                questions_from_backup = True
+            question_blocking, _ = split_guide_issues(question_issues)
+            if question_blocking:
+                questions, question_issues = generate_questions(question_blocking)
+                question_blocking, _ = split_guide_issues(question_issues)
+            if question_blocking:
+                # 按用户决策移除降级题兜底：模型两次仍有硬伤时直接失败，该课保持
+                # 无 studyGuide 状态，由上层标记“尚未完整生成”，下一轮自动重试模型。
+                raise ValueError(
+                    f"任务 {task_id} 自测题连续两次未通过硬校验：" + "；".join(question_blocking[:5])
+                )
             else:
                 self.deps.save_artifact(
                     self.course_id,
@@ -273,20 +284,18 @@ class LessonBuilder:
             source_coverage=1,
             summary="已通过来源、公式条件、例题完整性和自测覆盖校验。",
         )
-        degraded = guide_from_backup or questions_from_backup
         attach_readability_review({**task, "studyGuide": guide}, self.content_style)
-        # 降级内容不写入检查点，避免瞬时模型故障被永久缓存；下次生成会重新尝试模型。
-        if not degraded:
-            self.deps.save_artifact(
-                self.course_id,
-                artifact_type,
-                {
-                    "signature": lesson_signature,
-                    "studyGuide": guide,
-                    "practiceQuestions": questions,
-                },
-                status="checkpoint",
-                source_run_id=self.run_id,
-            )
-        return task_id, guide, questions, report, degraded
+        self.deps.save_artifact(
+            self.course_id,
+            artifact_type,
+            {
+                "signature": lesson_signature,
+                "studyGuide": guide,
+                "practiceQuestions": questions,
+            },
+            status="checkpoint",
+            source_run_id=self.run_id,
+        )
+        # 降级模式已按用户决策移除：能走到这里的一定是模型稿（软伤已接受并记录）。
+        return task_id, guide, questions, report, False
         

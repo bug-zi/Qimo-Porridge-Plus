@@ -28,7 +28,7 @@ def test_prompt_context_expands_trusted_rules() -> None:
 
 def test_story_prompt_context_exposes_full_runtime_contract() -> None:
     context = course_style_prompt_context("story")
-    assert context["version"] == 3
+    assert context["version"] == 5
     assert context["planningRules"]
     assert context["preparationRules"]
     assert context["explanationRules"]
@@ -37,5 +37,5 @@ def test_story_prompt_context_exposes_full_runtime_contract() -> None:
     assert context["continuityRules"]
     assert context["reviewRules"]
     assert any("只生成背景引导" in rule for rule in context["preparationRules"])
-    assert any("4至7个" in rule for rule in context["explanationRules"])
-    assert any("2至3道独立变式" in rule for rule in context["exampleRules"])
+    assert any("3至8个" in rule for rule in context["explanationRules"])
+    assert any("2至4道独立变式" in rule for rule in context["exampleRules"])

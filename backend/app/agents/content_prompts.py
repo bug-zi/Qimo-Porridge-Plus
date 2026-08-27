@@ -30,14 +30,22 @@ LESSON_CONTENT_PROMPT = with_structured_formula_rules("""
    "workedExamples":[{"id":"...","title":"...","origin":"material|ai-adapted","independentVariant":false,"source":"内部依据，不在界面展示","problem":"完整具体题干","analysis":"识别考点与选择方法的过程","steps":["包含公式、代入、推导或论证的详细步骤"],"answer":"明确最终答案或结论","checks":["验算或结论检查"],"examPointIds":["本节考点id"]}],
    "storyContext":{"characters":["主要人物"],"setting":"生活化场景","mainEvent":"本节贯穿事件","incomingQuestion":"课前准备留下、讲解回答的问题","outgoingQuestion":"本节留下给下一课的问题","conceptMappings":[{"storyElement":"故事对象或行动","concept":"标准术语","explanation":"映射为何成立及边界"}]},
    "sections":[
-     {"kind":"preparation","label":"课前准备","title":"简短背景引导","narrative":"只写一个轻量背景事件；最后一句自然引向02开头","questions":["可选且最多1个由02立即回答的问题"],"terms":[{"term":"本节关键词","meaning":"准确且足够理解02的解释","storyMapping":"该词在背景事件中对应什么","role":"这个词在本节判断中的作用"}]},
-     {"kind":"explanation","label":"讲解","title":"接住01同一事件的标题","narrative":"开头直接承接01最后一句与同一事件","explanationBeats":[{"heading":"问题式或事件式二级标题，共4至7项","body":"讲清为什么成立及与前后知识的因果联系","conclusion":"准确结论","pitfall":"必要边界或易错点"}],"methodSummary":["可迁移的判断步骤"],"transitionToExamples":"自然引出03例题的事件进展"},
-     {"kind":"examples","label":"例题","title":"承接02事件进展的标题","narrative":"开头接住02的transitionToExamples","storyEventRef":"与storyContext.mainEvent一致","workedExamples":["恰好1个主故事综合例题对象，再加2至3个independentVariant=true的独立变式对象"],"methodSummary":["本组训练实际使用的判断方法"],"transitionToSelfCheck":"说明04撤去故事与提示、转为独立作答"},
+     {"kind":"preparation","label":"课前准备","title":"简短背景引导","narrative":"01的正文主体：写成可直接阅读的故事散文（至少2至3个自然段），让核心对象在具体事件中自然出现；禁止舞台说明式概括（如‘XX进入一个场景’‘接下来沿着变化解释’），最后一句自然引向02开头","questions":["2至5个由人物真实遇到的、02会回答的具体问题"],"terms":[{"term":"本节关键词","meaning":"准确且足够理解02的解释","storyMapping":"该词在背景事件中对应什么","role":"这个词在本节判断中的作用"}]},
+     {"kind":"explanation","label":"讲解","title":"接住01同一事件的标题","narrative":"开头直接承接01最后一句与同一事件，写成正文段落而非过渡说明","explanationBeats":[{"heading":"问题式或事件式二级标题，共3至8项，建议4至7项","body":"可直接阅读的讲解正文：沿因果线推进，把知识写进故事事件的解释里，而不是脱离故事的讲义腔","conclusion":"准确结论","pitfall":"必要边界或易错点"}],"methodSummary":["可迁移的判断步骤"],"transitionToExamples":"自然引出03例题的事件进展"},
+     {"kind":"examples","label":"例题","title":"承接02事件进展的标题","narrative":"开头接住02的transitionToExamples","storyEventRef":"与storyContext.mainEvent一致","workedExamples":["恰好1个主故事综合例题对象，再加2至4个independentVariant=true的独立变式对象"],"methodSummary":["本组训练实际使用的判断方法"],"transitionToSelfCheck":"说明04撤去故事与提示、转为独立作答"},
      {"kind":"self-check","label":"自测","title":"离开故事辅助后的独立判断","narrative":"简短承接且不提示答案","checklist":["独立作答要求"]}
    ]
   }
 }
-必须真正讲授课程知识，禁止输出学习方法套话。【四小节职责是硬合同】01只建场景和术语底座；02只负责因果讲解并以4至7个 explanationBeats 推进；03必须是1个主故事综合例题加2至3道独立变式；所有跨节 transition 字段必须自然衔接且在正文中可见。【用户强反馈优先级】coursePrompt 中的“用户强反馈/最高优先级生成合同”以及输入中的 strongFeedbackContract 都是 MUST 约束，优先于本 Prompt 的默认结构、风格模板和数量建议，必须逐条执行，不得只在措辞上轻微调整。公式写清条件与符号；计算、证明和应用型考点必须有具体例题。资料有原例题时优先使用，没有时可在 origin 标注 ai-adapted；explanation、analysis、problem、steps、answer、checks 等用户可见正文不要写来源、出处、资料依据或参考。输入若含 storyContinuity，只将其用于衔接课程总 Prompt 要求的故事/对话主线，不得据此新增技术事实。当 contentStyle.id=story 时，storyContext 与四个 sections 是强制合同：故事必须作为一等数据贯穿课前准备、讲解、例题、自测；顶层 examPoints/workedExamples 继续用于考点覆盖和兼容，但不得作为用户界面的叙事主结构。非故事版不要伪造 storyContext。
+必须真正讲授课程知识，禁止输出学习方法套话。【四小节职责是硬合同】01只建场景和术语底座；02只负责因果讲解并以3至8个 explanationBeats 推进；03必须是1个主故事综合例题加2至4道独立变式；所有跨节 transition 字段必须自然衔接且在正文中可见。【用户强反馈优先级】coursePrompt 中的“用户强反馈/最高优先级生成合同”以及输入中的 strongFeedbackContract 都是 MUST 约束，优先于本 Prompt 的默认结构、风格模板和数量建议，必须逐条执行，不得只在措辞上轻微调整。公式写清条件与符号；计算、证明和应用型考点必须有具体例题。资料有原例题时优先使用，没有时可在 origin 标注 ai-adapted；explanation、analysis、problem、steps、answer、checks 等用户可见正文不要写来源、出处、资料依据或参考。输入若含 storyContinuity，只将其用于衔接课程总 Prompt 要求的故事/对话主线，不得据此新增技术事实。当 contentStyle.id=story 时，storyContext 与四个 sections 是强制合同：故事必须作为一等数据贯穿课前准备、讲解、例题、自测；顶层 examPoints/workedExamples 继续用于考点覆盖和兼容，但不得作为用户界面的叙事主结构。非故事版不要伪造 storyContext。
+【故事版写作规则（与结构合同同等强制）】
+1. 人物必须是有名有姓、有具体生活情境的主角（如“小林”“阿哲”），禁止把“学习者”“同学”“用户”当人名；人物行动要具体（打开什么文件、点了哪个按钮、卡在哪一步）。
+2. narrative 与 beats body 是给学生阅读的正文本身，不是剧情概要：写成完整的自然段，禁止舞台说明（“XX进入一个场景”“接下来沿着变化解释判断为何成立”）、禁止元叙述（“先别急着记概念”“我们来看下一个知识点”这类导读腔每节最多出现一次且必须承载真实转折）。
+3. 先建立关系再展开概念：开头尽快让核心对象在故事中同时出现并说明基本关系，之后沿因果线推进——故事中出现问题→说明当前对象或状态→解释问题为什么发生→前一结论留下新的理解需要→引出下一概念。禁止先堆定义再补关系。
+4. 每个概念只落一次结论：要么先给结论再用故事细节阐释，要么先生动描述现象最后落回术语；禁止“定义→阐释→再总结作用”式重复。
+5. 语言亲切、直接、有信息量：共同观察时用“我们”；每句话至少完成一件事（提供事实、解释原因、限定边界或推动故事）；删除“先抓住、别担心、就行”等无信息安抚；禁用“不是……而是……”及机械变体；标题表达具体问题或故事中的关键变化，不用“概念介绍”“重点总结”式空标题。
+6. 类比必须与概念结构准确对应，并在同段或紧邻段落落回标准术语；故事人物、地点、日常事件可以虚构，技术事实、数据和条件不能虚构。
+7. examPoints.explanation 写成简明的考点卡片（供出题与检索用），不得与02的beats正文逐字重复——02负责“读得懂”，examPoints负责“查得快”。
 """)
 
 LESSON_PRACTICE_PROMPT = with_structured_formula_rules("""

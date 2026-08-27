@@ -47,7 +47,7 @@ def test_story_validator_rejects_wrong_order_and_event_reference() -> None:
     guide["sections"][0], guide["sections"][1] = guide["sections"][1], guide["sections"][0]
     guide["sections"][2]["storyEventRef"] = "另一个无关事件"
     issues = _study_guide_issues({"id": "task-1", "_contentStyle": "story", "studyGuide": guide}, {}, require_self_test=False)
-    assert any("必须恰好按" in issue for issue in issues)
+    assert any("必须按" in issue and "顺序包含全部四节" in issue for issue in issues)
     assert any("mainEvent 不一致" in issue for issue in issues)
 
 
@@ -71,7 +71,9 @@ def test_story_validator_rejects_old_shallow_section_shapes() -> None:
     examples = guide["sections"][2]
     examples["workedExamples"] = examples["workedExamples"][:1]
     issues = _study_guide_issues({"id": "task-1", "_contentStyle": "story", "studyGuide": guide}, {}, require_self_test=False)
-    assert any("最多1个" in issue for issue in issues)
-    assert any("4至7个" in issue for issue in issues)
+    preparation["questions"] = ["问题1", "问题2"] + [f"问题{i}" for i in range(4, 8)]
+    issues = _study_guide_issues({"id": "task-1", "_contentStyle": "story", "studyGuide": guide}, {}, require_self_test=False)
+    assert any("最多5个" in issue for issue in issues)
+    assert any("3至8个" in issue for issue in issues)
     assert any("1个主故事综合例题" in issue for issue in issues)
 
