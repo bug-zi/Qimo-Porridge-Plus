@@ -447,8 +447,66 @@ export function getRuntimeModel() {
   return request<RuntimeModel>('/runtime-model')
 }
 
+export type ModelUsageSnapshot = {
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+  calls: number
+  failures: number
+  startedAt: string
+  updatedAt: string
+  currentCall: { model: string; startedAt: string }
+  recent: Array<{ at: string; model: string; promptTokens: number; completionTokens: number; totalTokens: number }>
+}
+
+export function getModelUsage() {
+  return request<ModelUsageSnapshot>('/model-usage')
+}
+
 export function saveRuntimeModel(payload: { baseUrl: string; apiKey: string; model: string }) {
   return request<RuntimeModel>('/runtime-model', {
+    method: 'PUT',
+    body: JSON.stringify({
+      base_url: payload.baseUrl,
+      api_key: payload.apiKey,
+      model: payload.model,
+    }),
+  })
+}
+
+export type ModelProfilesResponse = {
+  active: string
+  profiles: Record<string, { baseUrl: string; model: string; hasApiKey: boolean }>
+}
+
+export function getModelProfiles() {
+  return request<ModelProfilesResponse>('/model-profiles')
+}
+
+export function saveModelProfile(provider: string, payload: { baseUrl: string; apiKey: string; model: string }) {
+  return request<ModelProfilesResponse>(`/model-profiles/${encodeURIComponent(provider)}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      base_url: payload.baseUrl,
+      api_key: payload.apiKey,
+      model: payload.model,
+    }),
+  })
+}
+
+export type BackupModelProfile = {
+  baseUrl: string
+  model: string
+  hasApiKey: boolean
+  connected: boolean
+}
+
+export function getBackupModel() {
+  return request<BackupModelProfile>('/backup-model')
+}
+
+export function saveBackupModel(payload: { baseUrl: string; apiKey: string; model: string }) {
+  return request<BackupModelProfile>('/backup-model', {
     method: 'PUT',
     body: JSON.stringify({
       base_url: payload.baseUrl,

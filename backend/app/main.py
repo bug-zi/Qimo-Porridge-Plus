@@ -47,7 +47,7 @@ def _maintain_plan_job(course_id: str, payload: dict[str, Any]) -> dict[str, Any
 
 
 def _approve_strategy_documents_job(course_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    approve_strategy_documents(
+    workspace = approve_strategy_documents(
         course_id,
         str(payload.get("reviewPlan", "")),
         str(payload.get("coursePrompt", "")),
@@ -62,7 +62,23 @@ def _approve_strategy_documents_job(course_id: str, payload: dict[str, Any]) -> 
         wait_for_generation_lock=True,
         job_id=str(payload.get("_jobId", "")),
     )
-    return {"courseId": course_id, "planned": True}
+    # 队列 completed 只表示 handler 正常返回；业务完成度必须随结果返回。
+    lesson_tasks = [
+        task for task in workspace.get("tasks", [])
+        if isinstance(task, dict) and str(task.get("kind", "")) != "orientation"
+    ]
+    completed = sum(1 for task in lesson_tasks if isinstance(task.get("studyGuide"), dict))
+    pending = len(lesson_tasks) - completed
+    requested = payload.get("lessonLimit")
+    return {
+        "courseId": course_id,
+        "planned": True,
+        "completedLessonCount": completed,
+        "pendingLessonCount": pending,
+        "requestedLessonLimit": int(requested) if requested is not None else None,
+        "contentComplete": pending == 0,
+        "partial": pending > 0,
+    }
 
 
 def _rebalance_plan_job(course_id: str, payload: dict[str, Any]) -> dict[str, Any]:

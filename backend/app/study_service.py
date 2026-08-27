@@ -92,10 +92,14 @@ _WORKSPACE_LOCKS_GUARD = threading.Lock()
 _CONTENT_GENERATION_LOCKS: dict[str, threading.Lock] = {}
 _CONTENT_GENERATION_LOCKS_GUARD = threading.Lock()
 MODEL_CONNECT_TIMEOUT_SECONDS = 20
-# 单次模型请求超时。gpt-5.x 系列是推理模型，生成「多日复习计划」这类大结构化 JSON
-# 实测可达 ~160s（输出 8000+ token），150s 会把正常慢请求误杀成超时。
-# 取 300s 给最重的策略规划调用留足余量；正常请求仍会在数秒~数十秒内返回。
-MODEL_REQUEST_TIMEOUT_SECONDS = 300
+# 单次模型请求读超时。非流式请求要等整个响应体到齐，因此它等价于“单次请求
+# 总时长上限”。思考型模型（glm-5.2）生成一节课讲义 JSON 实测需 5-8 分钟，
+# 300s/600s 会把正常慢请求误杀成超时，造成“超时→重试→再超时”假死循环。
+# 取 1800s（30 分钟）：约为最慢正常请求的 4 倍，事实上等于不设限；保留有限值
+# 是因为本服务为单线程后台 worker——上游“静默挂起”（aiedulab 已发生过）在
+# timeout=None 时会永久卡死生成队列且无任何机制可救。真正的解法是流式 + 首
+# token 超时（30s 无首字即判死），届时可安全去掉整包超时。
+MODEL_REQUEST_TIMEOUT_SECONDS = 1800
 MODEL_MAX_ATTEMPTS = 3
 MODEL_RETRYABLE_HTTP_CODES = {429, 500, 502, 503, 504}
 MODEL_RATE_LIMIT_RETRY_DELAYS_SECONDS = (20, 45)
@@ -107,6 +111,94 @@ MODEL_RATE_LIMIT_RETRY_DELAYS_SECONDS = (20, 45)
 MODEL_TRANSIENT_MAX_ATTEMPTS = 6
 MODEL_TRANSIENT_BACKOFF_BASE_SECONDS = 2.0
 MODEL_TRANSIENT_BACKOFF_CAP_SECONDS = 16.0
+
+# ------------------------------------------------------------------
+# 多模型档案与主备 failover
+# ------------------------------------------------------------------
+# 主模型与备用模型各自独立配置。主模型按“档案”保存（openai/deepseek/glm/custom…），
+# 切换档案只是切换激活哪一份，不会覆盖其他档案已保存的 Base URL / API Key / 模型名。
+# 备用模型单独一组变量；主模型整体失败（重试预算耗尽）后自动改投备用模型。
+BACKUP_MODEL_ENV_KEYS = {
+    "base_url": "EXAM_BOOSTER_BACKUP_MODEL_BASE_URL",
+    "api_key": "EXAM_BOOSTER_BACKUP_MODEL_API_KEY",
+    "model": "EXAM_BOOSTER_BACKUP_MODEL_NAME",
+}
+# 熔断：主模型连续 N 次调用（每次调用含其内部重试预算）失败后，冷却期内直接走备用，
+# 避免每次调用都先耗尽主模型数分钟的退避重试；冷却到期自动先试回主模型。
+PROVIDER_BREAKER_THRESHOLD = 3
+PROVIDER_BREAKER_COOLDOWN_SECONDS = 1800
+# 单个 provider 在一次调用内的总时间预算：一次完整请求超时（300s）加余量。
+# 防止“静默挂起”的上游把 6 次内部重试 × 300s 全部吃满（约 30 分钟）才放弃，
+# 让 failover 形同虚设。预算烧完立即切下一个 provider。正常慢请求（gpt-5.x
+# 大 JSON 约 160s）不受影响。
+MODEL_PROVIDER_BUDGET_SECONDS = MODEL_REQUEST_TIMEOUT_SECONDS + 60
+_PROVIDER_BREAKER = {"consecutive_failures": 0, "open_until": 0.0}
+
+# ------------------------------------------------------------------
+# 模型调用用量统计（进程级累计，供前端生成进度展示）
+# ------------------------------------------------------------------
+from collections import deque as _deque
+
+_MODEL_USAGE_LOCK = threading.Lock()
+_MODEL_USAGE: dict[str, Any] = {
+    "promptTokens": 0,
+    "completionTokens": 0,
+    "totalTokens": 0,
+    "calls": 0,
+    "failures": 0,
+    "startedAt": "",
+    "updatedAt": "",
+    "currentCall": {"model": "", "startedAt": ""},
+}
+_MODEL_USAGE_RECENT: _deque = _deque(maxlen=30)
+
+
+def _record_model_call_start(model_name: str) -> None:
+    """记录一次模型调用的开始：思考型模型出结果前有数分钟静默期，
+    前端靠这个字段展示“调用进行中已等待 Ns”，而不是毫无反馈。"""
+    with _MODEL_USAGE_LOCK:
+        _MODEL_USAGE["currentCall"] = {
+            "model": model_name,
+            "startedAt": datetime.now().isoformat(timespec="seconds"),
+        }
+
+
+def _record_model_usage(data: dict[str, Any], model_name: str, *, failed: bool = False) -> None:
+    """从响应的 usage 字段累计 token 用量；失败调用只计数不累计 token。"""
+    now = datetime.now().isoformat(timespec="seconds")
+    with _MODEL_USAGE_LOCK:
+        if not _MODEL_USAGE["startedAt"]:
+            _MODEL_USAGE["startedAt"] = now
+        _MODEL_USAGE["updatedAt"] = now
+        _MODEL_USAGE["currentCall"] = {"model": "", "startedAt": ""}
+        if failed:
+            _MODEL_USAGE["failures"] += 1
+            return
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        completion_tokens = int(usage.get("completion_tokens") or 0)
+        _MODEL_USAGE["promptTokens"] += prompt_tokens
+        _MODEL_USAGE["completionTokens"] += completion_tokens
+        _MODEL_USAGE["totalTokens"] += prompt_tokens + completion_tokens
+        _MODEL_USAGE["calls"] += 1
+        _MODEL_USAGE_RECENT.append(
+            {
+                "at": now,
+                "model": model_name,
+                "promptTokens": prompt_tokens,
+                "completionTokens": completion_tokens,
+                "totalTokens": prompt_tokens + completion_tokens,
+            }
+        )
+
+
+def get_model_usage() -> dict[str, Any]:
+    """返回当前用量快照与最近若干次调用明细。"""
+    with _MODEL_USAGE_LOCK:
+        return {
+            **{key: value for key, value in _MODEL_USAGE.items()},
+            "recent": list(_MODEL_USAGE_RECENT),
+        }
 
 
 def _transient_retry_delay(attempt: int) -> float:
@@ -350,6 +442,37 @@ def get_runtime_model_api_key() -> str:
     return _read_runtime_env()["EXAM_BOOSTER_MODEL_API_KEY"]
 
 
+def resolve_api_key_for_base_url(base_url: str, explicit_key: str = "") -> str:
+    """按服务地址解析应使用的 API Key。
+
+    测试连接时前端常不回传明文 key（输入框留空表示沿用已保存的）。
+    旧逻辑一律兜底取主模型 key——当被测服务与主模型不同（如测 GLM 备用、
+    主模型是 aiedulab）时，会拿 A 的 key 敲 B 的门，产生误导性的 401。
+    现在按 base_url 依次匹配：主模型配置 → 备用模型配置 → 已保存档案。
+    """
+    if explicit_key.strip():
+        return explicit_key.strip()
+    normalized = base_url.strip().rstrip("/")
+    if not normalized:
+        return ""
+    config = _read_runtime_env()
+    if (
+        config["EXAM_BOOSTER_MODEL_BASE_URL"].rstrip("/") == normalized
+        and config["EXAM_BOOSTER_MODEL_API_KEY"]
+    ):
+        return config["EXAM_BOOSTER_MODEL_API_KEY"]
+    backup = _read_backup_model_env()
+    if backup["base_url"].rstrip("/") == normalized and backup["api_key"]:
+        return backup["api_key"]
+    store = _load_model_profile_store()
+    for profile in store["profiles"].values():
+        if not isinstance(profile, dict):
+            continue
+        if str(profile.get("baseUrl", "")).rstrip("/") == normalized and str(profile.get("apiKey", "")).strip():
+            return str(profile["apiKey"])
+    return ""
+
+
 def save_runtime_model_profile(base_url: str, api_key: str, model: str) -> dict[str, str | bool | list[str]]:
     config = _read_runtime_env()
     next_api_key = api_key.strip() or config["EXAM_BOOSTER_MODEL_API_KEY"]
@@ -403,6 +526,243 @@ def get_runtime_model_profile() -> dict[str, str | bool | list[str]]:
     }
 
 
+# ------------------------------------------------------------------
+# 多模型档案：每个厂商档案独立保存，切换互不影响
+# ------------------------------------------------------------------
+MODEL_PROFILES_PATH = DATA_DIRECTORY / "model_profiles.json"
+
+
+def _load_model_profile_store() -> dict[str, Any]:
+    if not MODEL_PROFILES_PATH.exists():
+        return {"active": "", "profiles": {}}
+    try:
+        data = json.loads(MODEL_PROFILES_PATH.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return {"active": "", "profiles": {}}
+    if not isinstance(data, dict):
+        return {"active": "", "profiles": {}}
+    profiles = data.get("profiles")
+    return {
+        "active": str(data.get("active") or ""),
+        "profiles": profiles if isinstance(profiles, dict) else {},
+    }
+
+
+def _persist_model_profile_store(store: dict[str, Any]) -> None:
+    DATA_DIRECTORY.mkdir(parents=True, exist_ok=True)
+    MODEL_PROFILES_PATH.write_text(
+        json.dumps(store, ensure_ascii=False, indent=1),
+        encoding="utf-8",
+    )
+
+
+def _rewrite_env_lines(updates: dict[str, str]) -> None:
+    """重写 .env 中指定变量（保留其余行）；进程环境变量优先级不变。"""
+    preserved_lines: list[str] = []
+    if RUNTIME_ENV_PATH.exists():
+        for line in RUNTIME_ENV_PATH.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                preserved_lines.append(line)
+                continue
+            key = stripped.split("=", 1)[0].strip()
+            if key not in updates:
+                preserved_lines.append(line)
+    RUNTIME_ENV_PATH.write_text(
+        "\n".join([*preserved_lines, *(f"{key}={value}" for key, value in updates.items())]) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _activate_model_profile_values(base_url: str, api_key: str, model: str) -> None:
+    _rewrite_env_lines(
+        {
+            "EXAM_BOOSTER_MODEL_BASE_URL": base_url.strip().rstrip("/"),
+            "EXAM_BOOSTER_MODEL_API_KEY": api_key.strip(),
+            "EXAM_BOOSTER_MODEL_NAME": model.strip(),
+        }
+    )
+    # 主模型配置变化后重置熔断，立即用新配置试探。
+    _PROVIDER_BREAKER["consecutive_failures"] = 0
+    _PROVIDER_BREAKER["open_until"] = 0.0
+
+
+def get_model_profiles() -> dict[str, Any]:
+    """读取全部档案（API Key 只回传 hasApiKey 布尔，不回传明文）。"""
+    store = _load_model_profile_store()
+    active = store["active"]
+    if not active:
+        # 兼容存量单配置：.env 当前值若与某个档案一致，则视为该档案激活。
+        config = _read_runtime_env()
+        for profile_id, profile in store["profiles"].items():
+            if (
+                str(profile.get("baseUrl", "")).rstrip("/") == config["EXAM_BOOSTER_MODEL_BASE_URL"].rstrip("/")
+                and str(profile.get("model", "")) == config["EXAM_BOOSTER_MODEL_NAME"]
+                and str(profile.get("apiKey", "")) == config["EXAM_BOOSTER_MODEL_API_KEY"]
+            ):
+                active = profile_id
+                break
+    safe_profiles = {
+        profile_id: {
+            "baseUrl": str(profile.get("baseUrl", "")),
+            "model": str(profile.get("model", "")),
+            "hasApiKey": bool(str(profile.get("apiKey", "")).strip()),
+        }
+        for profile_id, profile in store["profiles"].items()
+        if isinstance(profile, dict)
+    }
+    return {"active": active, "profiles": safe_profiles}
+
+
+def save_model_profile(profile_id: str, base_url: str, api_key: str, model: str) -> dict[str, Any]:
+    """保存指定档案并激活。api_key 留空表示沿用该档案已保存的 Key，不影响其他档案。"""
+    normalized_id = profile_id.strip() or "custom"
+    store = _load_model_profile_store()
+    profiles = store["profiles"]
+    existing = profiles.get(normalized_id, {}) if isinstance(profiles.get(normalized_id), dict) else {}
+    next_key = api_key.strip() or str(existing.get("apiKey", ""))
+    profiles[normalized_id] = {
+        "baseUrl": base_url.strip().rstrip("/"),
+        "apiKey": next_key,
+        "model": model.strip(),
+    }
+    store["profiles"] = profiles
+    store["active"] = normalized_id
+    _persist_model_profile_store(store)
+    if next_key:
+        _activate_model_profile_values(base_url, next_key, model)
+    return {
+        "active": normalized_id,
+        "profiles": {
+            pid: {
+                "baseUrl": str(profile.get("baseUrl", "")),
+                "model": str(profile.get("model", "")),
+                "hasApiKey": bool(str(profile.get("apiKey", "")).strip()),
+            }
+            for pid, profile in profiles.items()
+            if isinstance(profile, dict)
+        },
+    }
+
+
+# ------------------------------------------------------------------
+# 备用模型配置（独立于主模型档案）
+# ------------------------------------------------------------------
+
+
+def _read_backup_model_env() -> dict[str, str]:
+    values = {key: os.getenv(env_name, "") for key, env_name in BACKUP_MODEL_ENV_KEYS.items()}
+    if not RUNTIME_ENV_PATH.exists():
+        return values
+    for line in RUNTIME_ENV_PATH.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        for field, env_name in BACKUP_MODEL_ENV_KEYS.items():
+            if key == env_name and not values[field]:
+                values[field] = value.strip().strip('"').strip("'")
+    return values
+
+
+def get_backup_model_profile() -> dict[str, Any]:
+    backup = _read_backup_model_env()
+    return {
+        "baseUrl": backup["base_url"].rstrip("/"),
+        "model": backup["model"],
+        "hasApiKey": bool(backup["api_key"].strip()),
+        "connected": bool(backup["base_url"].strip() and backup["api_key"].strip() and backup["model"].strip()),
+    }
+
+
+def save_backup_model_profile(base_url: str, api_key: str, model: str) -> dict[str, Any]:
+    current = _read_backup_model_env()
+    next_key = api_key.strip() or current["api_key"]
+    _rewrite_env_lines(
+        {
+            BACKUP_MODEL_ENV_KEYS["base_url"]: base_url.strip().rstrip("/"),
+            BACKUP_MODEL_ENV_KEYS["api_key"]: next_key,
+            BACKUP_MODEL_ENV_KEYS["model"]: model.strip(),
+        }
+    )
+    return get_backup_model_profile()
+
+
+# ------------------------------------------------------------------
+# 主备 failover：provider 列表 + 熔断
+# ------------------------------------------------------------------
+
+
+def _note_provider_result(role: str, succeeded: bool) -> None:
+    if role != "primary":
+        return
+    if succeeded:
+        _PROVIDER_BREAKER["consecutive_failures"] = 0
+        _PROVIDER_BREAKER["open_until"] = 0.0
+        return
+    _PROVIDER_BREAKER["consecutive_failures"] += 1
+    if _PROVIDER_BREAKER["consecutive_failures"] >= PROVIDER_BREAKER_THRESHOLD:
+        _PROVIDER_BREAKER["open_until"] = time.monotonic() + PROVIDER_BREAKER_COOLDOWN_SECONDS
+
+
+def _model_providers() -> list[dict[str, str]]:
+    """返回按尝试顺序排列的 provider 列表；主模型熔断期间备用先行。"""
+    primary = _read_runtime_env()
+    backup = _read_backup_model_env()
+    providers: list[dict[str, str]] = []
+    if primary["EXAM_BOOSTER_MODEL_BASE_URL"] and primary["EXAM_BOOSTER_MODEL_API_KEY"] and primary["EXAM_BOOSTER_MODEL_NAME"]:
+        providers.append(
+            {
+                "role": "primary",
+                "base_url": primary["EXAM_BOOSTER_MODEL_BASE_URL"].rstrip("/"),
+                "api_key": primary["EXAM_BOOSTER_MODEL_API_KEY"],
+                "model": primary["EXAM_BOOSTER_MODEL_NAME"],
+            }
+        )
+    if backup["base_url"] and backup["api_key"] and backup["model"]:
+        same_as_primary = any(
+            provider["base_url"] == backup["base_url"].rstrip("/")
+            and provider["api_key"] == backup["api_key"]
+            and provider["model"] == backup["model"]
+            for provider in providers
+        )
+        # 主备配置完全相同时跳过备用：failover 到同一个端点只会把失败时间翻倍。
+        if not same_as_primary:
+            providers.append(
+                {
+                    "role": "backup",
+                    "base_url": backup["base_url"].rstrip("/"),
+                    "api_key": backup["api_key"],
+                    "model": backup["model"],
+                }
+            )
+    if (
+        len(providers) == 2
+        and providers[0]["role"] == "primary"
+        and time.monotonic() < _PROVIDER_BREAKER["open_until"]
+    ):
+        providers.reverse()
+    return providers
+
+
+def _provider_request(provider: dict[str, str], payload: dict[str, Any], *, stream: bool = False) -> Request:
+    body = {"model": provider["model"], **payload}
+    if stream:
+        body["stream"] = True
+    return Request(
+        f"{provider['base_url']}/chat/completions",
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {provider['api_key']}",
+            "Content-Type": "application/json; charset=utf-8",
+            "Accept": "application/json",
+            "User-Agent": "exam-booster-local-api/0.2.0",
+        },
+        method="POST",
+    )
+
+
 def parse_available_model_ids(payload: bytes) -> list[str]:
     data = json.loads(payload.decode("utf-8"))
     model_items = data.get("data") if isinstance(data, dict) else data
@@ -438,19 +798,99 @@ def fetch_available_model_ids(base_url: str, api_key: str) -> list[str]:
         return parse_available_model_ids(response.read())
 
 
-def _request_model_json(request: Request, operation: str) -> dict[str, Any]:
+def _non_retryable_http_reason(error: HTTPError) -> str:
+    """读取 HTTP 错误体，识别不可通过等待恢复的错误（如账户无额度/套餐耗尽）。
+
+    bigmodel 的配额类错误以 429 返回但 body 中带 code=1113（“当前无可用套餐资源，请充值”）。
+    这类错误重试毫无意义——按限流退避只会让每个调用空转一分钟以上。
+    返回非空字符串表示不可重试的原因；空字符串表示可按正常策略重试。
+    """
+    try:
+        body = error.read().decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+    for marker in ("1113", "套餐资源", "请充值", "insufficient", "balance", "arrearage"):
+        if marker.lower() in body.lower():
+            return f"账户配额不足（{body[:160]}）"
+    return ""
+
+
+def probe_model_chat(base_url: str, api_key: str, model: str) -> dict[str, Any]:
+    """测试连接的真实探测：向 /chat/completions 发一条极小请求。
+
+    仅凭 GET /models 列模型会误报“连接成功”——列表接口不消耗额度，
+    账户无套餐/余额时照样 200。真实可用性必须发一次对话请求验证。
+    """
+    if not (base_url and api_key and model):
+        return {"success": False, "message": "请先填写 Base URL、API Key 和模型名"}
+    request = Request(
+        f"{base_url.strip().rstrip('/')}/chat/completions",
+        data=json.dumps(
+            {
+                "model": model.strip(),
+                "messages": [{"role": "user", "content": "只回复两个字符：ok"}],
+                "max_tokens": 32,
+                "temperature": 0.1,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json; charset=utf-8",
+            "User-Agent": "exam-booster-local-api/0.2.0",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=60) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        body = ""
+        try:
+            body = error.read().decode("utf-8", errors="replace")[:200]
+        except Exception:
+            pass
+        quota_reason = _non_retryable_http_reason(error)
+        if quota_reason:
+            return {"success": False, "message": f"模型不可用（HTTP {error.code}）：{quota_reason}。注意：智谱 Coding Plan 套餐请使用 https://open.bigmodel.cn/api/coding/paas/v4 端点"}
+        return {"success": False, "message": f"模型不可用（HTTP {error.code}）：{body or '服务返回错误'}"}
+    except (URLError, TimeoutError, OSError) as error:
+        return {"success": False, "message": f"无法连接模型服务：{error}"}
+    except ValueError:
+        return {"success": False, "message": "模型服务返回内容无法解析，请确认接口兼容 OpenAI 格式"}
+    choices = data.get("choices") or []
+    content = ""
+    if choices and isinstance(choices[0], dict):
+        message = choices[0].get("message") or {}
+        content = str(message.get("content", "")).strip()
+    # 推理模型的短探测可能把 token 花在思考上，content 为空也视为可用
+    # （HTTP 200 已证明鉴权与额度通过）。
+    return {"success": True, "message": f"模型 {model.strip()} 实测可用", "content": content[:40]}
+
+def _request_model_json(request: Request, operation: str, *, deadline: float | None = None) -> dict[str, Any]:
     last_error: Exception | None = None
     http_attempts = 0
     for attempt in range(1, MODEL_TRANSIENT_MAX_ATTEMPTS + 1):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise RuntimeError(f"{operation}超出单 provider 时间预算，立即改投备用模型")
         retry_delay = 0.0
         try:
+            try:
+                body_model = str(json.loads(request.data.decode("utf-8")).get("model", ""))
+            except Exception:
+                body_model = ""
+            _record_model_call_start(body_model)
             with urlopen(request, timeout=MODEL_REQUEST_TIMEOUT_SECONDS) as response:
                 data = json.loads(response.read().decode("utf-8"))
             if not isinstance(data, dict):
                 raise RuntimeError(f"{operation}返回格式无效")
+            _record_model_usage(data, body_model)
             return data
         except HTTPError as error:
             last_error = error
+            quota_reason = _non_retryable_http_reason(error)
+            if quota_reason:
+                raise RuntimeError(f"{operation}返回 HTTP {error.code}：{quota_reason}，请到模型服务商控制台充值或更换模型") from error
             http_attempts += 1
             if error.code not in MODEL_RETRYABLE_HTTP_CODES or http_attempts >= MODEL_MAX_ATTEMPTS:
                 raise RuntimeError(f"{operation}连续 {http_attempts} 次返回 HTTP {error.code}") from error
@@ -467,6 +907,8 @@ def _request_model_json(request: Request, operation: str) -> dict[str, Any]:
             # 连接级瞬时错误（SSL EOF/重置/超时）单独给更激进的重试预算，熬过网关坏窗口。
             if attempt >= MODEL_TRANSIENT_MAX_ATTEMPTS:
                 raise RuntimeError(f"{operation}连接失败或响应超时") from error
+            if deadline is not None and time.monotonic() >= deadline:
+                raise RuntimeError(f"{operation}超出单 provider 时间预算，立即改投备用模型") from error
             retry_delay = _transient_retry_delay(attempt)
         except ValueError as error:
             raise RuntimeError(f"{operation}返回内容无法解析") from error
@@ -479,40 +921,41 @@ def _model_completion(
     *,
     json_mode: bool = False,
 ) -> str:
-    config = _read_runtime_env()
-    base_url = config["EXAM_BOOSTER_MODEL_BASE_URL"].rstrip("/")
-    api_key = config["EXAM_BOOSTER_MODEL_API_KEY"]
-    model = config["EXAM_BOOSTER_MODEL_NAME"]
-    if not base_url or not api_key or not model:
+    providers = _model_providers()
+    if not providers:
         raise RuntimeError("本机模型尚未配置")
 
-    payload = {
-        "model": model,
+    payload: dict[str, Any] = {
         "messages": messages,
         "temperature": 0.25,
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
-    request = Request(
-        f"{base_url}/chat/completions",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json; charset=utf-8",
-            "Accept": "application/json",
-            "User-Agent": "exam-booster-local-api/0.2.0",
-        },
-        method="POST",
-    )
-    data = _request_model_json(request, "模型服务")
 
-    choices = data.get("choices", [])
-    if not choices:
-        raise RuntimeError("模型服务没有返回可用内容")
-    content = choices[0].get("message", {}).get("content", "")
-    if not isinstance(content, str) or not content.strip():
-        raise RuntimeError("模型服务返回内容为空")
-    return content.strip()
+    errors: list[str] = []
+    for provider in providers:
+        request = _provider_request(provider, payload)
+        try:
+            data = _request_model_json(
+                request,
+                f"模型服务({provider['role']})",
+                deadline=time.monotonic() + MODEL_PROVIDER_BUDGET_SECONDS,
+            )
+        except RuntimeError as error:
+            # 主模型（含其内部重试预算）整体失败 → 记录熔断计数并改投下一个 provider。
+            _note_provider_result(provider["role"], False)
+            _record_model_usage({}, provider["model"], failed=True)
+            errors.append(f"{provider['role']}({provider['model']}): {error}")
+            continue
+        _note_provider_result(provider["role"], True)
+        choices = data.get("choices", [])
+        if not choices:
+            raise RuntimeError("模型服务没有返回可用内容")
+        content = choices[0].get("message", {}).get("content", "")
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("模型服务返回内容为空")
+        return content.strip()
+    raise RuntimeError("主模型与备用模型均不可用：" + "；".join(errors))
 
 
 def _model_json(task_prompt: str, user_content: str, course_prompt: str = "") -> dict[str, Any]:
@@ -525,31 +968,34 @@ def _model_json(task_prompt: str, user_content: str, course_prompt: str = "") ->
 
 
 def _model_agent_turn(messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
-    config = _read_runtime_env()
-    base_url = config["EXAM_BOOSTER_MODEL_BASE_URL"].rstrip("/")
-    api_key = config["EXAM_BOOSTER_MODEL_API_KEY"]
-    model = config["EXAM_BOOSTER_MODEL_NAME"]
-    if not base_url or not api_key or not model:
+    providers = _model_providers()
+    if not providers:
         raise RuntimeError("本机模型尚未配置")
-    payload = {
-        "model": model,
+    payload: dict[str, Any] = {
         "messages": messages,
         "tools": tools,
         "tool_choice": "auto",
         "temperature": 0.2,
     }
-    request = Request(
-        f"{base_url}/chat/completions",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json; charset=utf-8",
-            "Accept": "application/json",
-            "User-Agent": "exam-booster-local-api/0.2.0",
-        },
-        method="POST",
-    )
-    data = _request_model_json(request, "模型工具调用")
+    data: dict[str, Any] = {}
+    errors: list[str] = []
+    for provider in providers:
+        request = _provider_request(provider, payload)
+        try:
+            data = _request_model_json(
+                request,
+                f"模型工具调用({provider['role']})",
+                deadline=time.monotonic() + MODEL_PROVIDER_BUDGET_SECONDS,
+            )
+        except RuntimeError as error:
+            _note_provider_result(provider["role"], False)
+            _record_model_usage({}, provider["model"], failed=True)
+            errors.append(f"{provider['role']}({provider['model']}): {error}")
+            continue
+        _note_provider_result(provider["role"], True)
+        break
+    if not data:
+        raise RuntimeError("主模型与备用模型均不可用：" + "；".join(errors))
     choices = data.get("choices", [])
     if not choices or not isinstance(choices[0].get("message"), dict):
         raise RuntimeError("模型没有返回可用工具调用结果")
@@ -576,7 +1022,7 @@ def _model_agent_turn(messages: list[dict[str, Any]], tools: list[dict[str, Any]
     }
 
 
-def _open_model_stream(request: Request, operation: str):
+def _open_model_stream(request: Request, operation: str, *, deadline: float | None = None):
     """建立到模型服务的流式连接。
 
     仅在“连接建立”阶段重试；连接级瞬时错误按 MODEL_TRANSIENT_MAX_ATTEMPTS 退避
@@ -587,12 +1033,17 @@ def _open_model_stream(request: Request, operation: str):
     last_error: Exception | None = None
     http_attempts = 0
     for attempt in range(1, MODEL_TRANSIENT_MAX_ATTEMPTS + 1):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise RuntimeError(f"{operation}超出单 provider 时间预算，立即改投备用模型")
         retry_delay = 0.0
         try:
             return urlopen(request, timeout=MODEL_REQUEST_TIMEOUT_SECONDS)
         except HTTPError as error:
             last_error = error
             http_attempts += 1
+            quota_reason = _non_retryable_http_reason(error)
+            if quota_reason:
+                raise RuntimeError(f"{operation}返回 HTTP {error.code}：{quota_reason}，请到模型服务商控制台充值或更换模型") from error
             if error.code not in MODEL_RETRYABLE_HTTP_CODES or http_attempts >= MODEL_MAX_ATTEMPTS:
                 raise RuntimeError(f"{operation}连续 {http_attempts} 次返回 HTTP {error.code}") from error
             retry_delay = 2 ** (http_attempts - 1)
@@ -619,33 +1070,35 @@ def _stream_model_turn(messages: list[dict[str, Any]], tools: list[dict[str, Any
     同时按 index 累积 delta.tool_calls（name 只在首片出现，arguments 为增量字符串）。
     流结束后 yield ("turn", {content, toolCalls, assistantMessage})——结构同 _model_agent_turn。
     """
-    config = _read_runtime_env()
-    base_url = config["EXAM_BOOSTER_MODEL_BASE_URL"].rstrip("/")
-    api_key = config["EXAM_BOOSTER_MODEL_API_KEY"]
-    model = config["EXAM_BOOSTER_MODEL_NAME"]
-    if not base_url or not api_key or not model:
+    providers = _model_providers()
+    if not providers:
         raise RuntimeError("本机模型尚未配置")
 
-    payload = {
-        "model": model,
+    payload: dict[str, Any] = {
         "messages": messages,
         "tools": tools,
         "tool_choice": "auto",
         "temperature": 0.2,
-        "stream": True,
     }
-    request = Request(
-        f"{base_url}/chat/completions",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json; charset=utf-8",
-            "Accept": "text/event-stream",
-            "User-Agent": "exam-booster-local-api/0.2.0",
-        },
-        method="POST",
-    )
-    response = _open_model_stream(request, "模型流式工具调用")
+    response = None
+    errors: list[str] = []
+    for provider in providers:
+        # failover 只发生在“连接建立”阶段；读流中途断开仍按原有语义交给调用方。
+        request = _provider_request(provider, payload, stream=True)
+        try:
+            response = _open_model_stream(
+                request,
+                f"模型流式工具调用({provider['role']})",
+                deadline=time.monotonic() + MODEL_PROVIDER_BUDGET_SECONDS,
+            )
+        except RuntimeError as error:
+            _note_provider_result(provider["role"], False)
+            errors.append(f"{provider['role']}({provider['model']}): {error}")
+            continue
+        _note_provider_result(provider["role"], True)
+        break
+    if response is None:
+        raise RuntimeError("主模型与备用模型均不可用：" + "；".join(errors))
     content_parts: list[str] = []
     tool_call_buffers: dict[int, dict[str, Any]] = {}
     try:

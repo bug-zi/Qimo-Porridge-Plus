@@ -20,9 +20,15 @@ from ..auth_service import (
 )
 from ..study_service import (
     fetch_available_model_ids,
+    probe_model_chat,
+    resolve_api_key_for_base_url,
+    get_backup_model_profile,
+    get_model_profiles,
     get_runtime_model_api_key,
     get_runtime_model_profile,
     get_user_profile_prompt,
+    save_backup_model_profile,
+    save_model_profile,
     save_runtime_model_profile,
     save_user_profile_prompt,
 )
@@ -66,6 +72,18 @@ class EmbeddingConfigRequest(BaseModel):
     model: str = Field(min_length=1, max_length=200)
 
 
+class ModelProfileEntryRequest(BaseModel):
+    base_url: str = Field(min_length=8, max_length=500)
+    api_key: str = Field(default="", max_length=500)
+    model: str = Field(min_length=1, max_length=200)
+
+
+class BackupModelUpdateRequest(BaseModel):
+    base_url: str = Field(min_length=8, max_length=500)
+    api_key: str = Field(default="", max_length=500)
+    model: str = Field(min_length=1, max_length=200)
+
+
 @router.post("/api/model-profiles/test", response_model=ModelProfileTestResponse)
 def test_model_profile(payload: ModelProfileTestRequest) -> ModelProfileTestResponse:
     base_url = payload.base_url.strip().rstrip("/")
@@ -73,22 +91,14 @@ def test_model_profile(payload: ModelProfileTestRequest) -> ModelProfileTestResp
     if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
         raise HTTPException(status_code=422, detail="Base URL 必须是合法的 HTTP 或 HTTPS 地址")
 
-    api_key = payload.api_key.strip() or get_runtime_model_api_key()
+    # key 留空表示沿用已保存的：按被测服务的 base_url 匹配主模型/备用/档案中
+    # 已保存的 key，而不是一律取主模型的 key（跨服务商会产生误导性 401）。
+    api_key = resolve_api_key_for_base_url(base_url, payload.api_key)
     if not api_key:
-        return ModelProfileTestResponse(success=False, message="请先填写 API Key 或保存本机 API Key")
+        return ModelProfileTestResponse(success=False, message="未找到该服务已保存的 API Key，请先填写")
 
     try:
         available_models = fetch_available_model_ids(base_url, api_key)
-        selected_model = payload.model.strip()
-        if selected_model and available_models and selected_model not in available_models:
-            return ModelProfileTestResponse(
-                success=False,
-                message="连接成功，但当前模型不在可用列表中",
-                available_models=available_models,
-            )
-        model_count = len(available_models)
-        message = f"连接成功，已读取 {model_count} 个可用模型" if model_count else "连接成功，但未读取到可用模型列表"
-        return ModelProfileTestResponse(success=True, message=message, available_models=available_models)
     except HTTPError as error:
         return ModelProfileTestResponse(success=False, message=f"模型服务返回 HTTP {error.code}，请检查 API Key 和服务地址")
     except URLError:
@@ -98,10 +108,68 @@ def test_model_profile(payload: ModelProfileTestRequest) -> ModelProfileTestResp
     except ValueError:
         return ModelProfileTestResponse(success=False, message="模型服务返回内容无法解析，请确认 /models 接口兼容 OpenAI 格式")
 
+    selected_model = payload.model.strip()
+    if selected_model and available_models and selected_model not in available_models:
+        return ModelProfileTestResponse(
+            success=False,
+            message=f"服务可达（{len(available_models)} 个模型），但「{selected_model}」不在可用列表中",
+            available_models=available_models,
+        )
+
+    # 关键：/models 不消耗额度，账户无套餐时也会成功——必须真实对话一次才能确认可用。
+    probe_model = selected_model or (available_models[0] if available_models else "")
+    if not probe_model:
+        return ModelProfileTestResponse(
+            success=False,
+            message="服务可达，但未读取到模型列表且未填写模型名，无法完成实测",
+            available_models=available_models,
+        )
+    probe = probe_model_chat(base_url, api_key, probe_model)
+    model_count = len(available_models)
+    if not probe["success"]:
+        return ModelProfileTestResponse(
+            success=False,
+            message=f"服务可达（{model_count} 个模型），但实测调用失败：{probe['message']}",
+            available_models=available_models,
+        )
+    return ModelProfileTestResponse(
+        success=True,
+        message=f"连接成功且模型实测可用（{model_count} 个模型）" if model_count else probe["message"],
+        available_models=available_models,
+    )
+
 
 @router.get("/api/runtime-model")
 def runtime_model() -> dict[str, str | bool | list[str]]:
     return get_runtime_model_profile()
+
+
+@router.get("/api/model-profiles")
+def model_profiles() -> dict[str, Any]:
+    return get_model_profiles()
+
+
+@router.put("/api/model-profiles/{profile_id}")
+def update_model_profile(profile_id: str, payload: ModelProfileEntryRequest) -> dict[str, Any]:
+    base_url = payload.base_url.strip().rstrip("/")
+    parsed_url = urlparse(base_url)
+    if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
+        raise HTTPException(status_code=422, detail="Base URL 必须是合法的 HTTP 或 HTTPS 地址")
+    return save_model_profile(profile_id, base_url, payload.api_key, payload.model)
+
+
+@router.get("/api/backup-model")
+def backup_model() -> dict[str, Any]:
+    return get_backup_model_profile()
+
+
+@router.put("/api/backup-model")
+def update_backup_model(payload: BackupModelUpdateRequest) -> dict[str, Any]:
+    base_url = payload.base_url.strip().rstrip("/")
+    parsed_url = urlparse(base_url)
+    if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
+        raise HTTPException(status_code=422, detail="Base URL 必须是合法的 HTTP 或 HTTPS 地址")
+    return save_backup_model_profile(base_url, payload.api_key, payload.model)
 
 
 @router.put("/api/runtime-model")

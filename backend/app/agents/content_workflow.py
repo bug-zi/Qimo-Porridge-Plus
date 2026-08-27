@@ -329,6 +329,12 @@ def run_content_workflow(
                 )
                 raise
             except Exception as error:
+                # 所有可用模型整体不可用（配额耗尽/连接失败）时立即中止整个生成任务，
+                # 避免剩余几十节课逐节空转、每节都耗尽一遍重试预算。
+                if "主模型与备用模型均不可用" in str(error) or "账户配额不足" in str(error):
+                    raise ValueError(
+                        f"任务 {label} 生成失败且当前无可用模型，已中止本轮生成：{error}"
+                    ) from error
                 partial_errors.append(f"任务 {label} 内容生成中断：{error}")
                 task["contentQualityWarning"] = "讲义、例题和自测尚未完整生成；稍后可重新生成复习主线继续补齐。"
                 record_agent_step(run_id, 3, f"lesson_builder:{label}", "failed", error=error)

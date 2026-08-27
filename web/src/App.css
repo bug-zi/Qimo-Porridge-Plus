@@ -2443,6 +2443,21 @@ textarea:focus-visible {
 .readable-study-text { display: grid; gap: 0.85em; max-inline-size: 72ch; }
 .readable-study-text p { margin: 0; color: var(--text); font-size: 15px; line-height: 1.88; overflow-wrap: anywhere; }
 .story-narrative .readable-study-text { max-inline-size: 68ch; }
+
+/* 设置页：连接状态独立行 / 可用模型列表 / 备用模型面板 */
+.settings-connection-status { margin: 14px 0 0; justify-self: start; }
+.available-models-list { margin-top: 12px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px; }
+.available-models-list p { margin: 0 0 10px; font-size: 13px; color: var(--text-secondary); }
+.available-models-list ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; max-height: 264px; overflow-y: auto; }
+.available-models-list li { display: flex; align-items: stretch; }
+.available-models-list li + li { border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent); }
+.available-models-list li button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 8px; border: 0; background: transparent; color: var(--text); font-size: 13.5px; line-height: 1.4; text-align: left; cursor: pointer; border-radius: 6px; }
+.available-models-list li button::before { counter-increment: model-index; content: counter(model-index); flex: none; min-width: 26px; height: 22px; display: inline-flex; align-items: center; justify-content: center; border-radius: 6px; background: color-mix(in srgb, var(--primary, #3973e8) 10%, transparent); color: var(--primary, #3973e8); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.available-models-list ul { counter-reset: model-index; }
+.available-models-list li button:hover { background: color-mix(in srgb, var(--primary, #3973e8) 8%, transparent); }
+.available-models-list li button:active { transform: none; }
+.backup-model-settings { margin-top: 18px; padding-top: 14px; border-top: 1px dashed var(--border); }
+.plan-generation-usage-recent { color: var(--text-muted); font-size: 12px; }
 .story-beat-conclusion { display: block; padding: 10px 12px; border-left: 3px solid var(--primary); border-radius: 0 7px 7px 0; background: color-mix(in srgb, var(--primary) 7%, var(--surface)); line-height: 1.7; }
 .story-lesson-page { max-inline-size: 78ch; margin-inline: auto; }
 .story-explanation-beats > section { padding: clamp(16px, 2.5vw, 24px); }
@@ -2481,7 +2496,43 @@ textarea:focus-visible {
 .story-method-summary ol { display: grid; gap: 6px; margin: 0; padding-left: 22px; }
 .story-section-transition { margin: 0; padding: 14px 16px; border-radius: 9px; color: var(--text); background: var(--primary-soft); line-height: 1.75; }
 @media (max-width: 720px) { .story-term-card { grid-template-columns: 1fr; gap: 8px; } }
-.story-outgoing-question { display: grid; gap: 6px; margin: 4px 0 0; padding: 14px 16px; border-left: 3px solid var(--primary); background: var(--surface-muted); line-height: 1.7; }
+.story-outgoing-question {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  margin: 4px 0 0;
+  padding: 15px 17px;
+  border: 1px solid color-mix(in srgb, var(--primary) 24%, var(--line));
+  border-left: 4px solid var(--primary);
+  border-radius: 0 10px 10px 0;
+  background: color-mix(in srgb, var(--primary) 6%, var(--surface-muted));
+  line-height: 1.8;
+}
+
+.story-outgoing-question > strong {
+  color: var(--primary-strong);
+  font-size: 12px;
+  letter-spacing: .04em;
+}
+
+.story-outgoing-question-body {
+  min-width: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 550;
+  line-height: 1.85;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  line-break: strict;
+}
+
+/* Keep glossary interaction and its dashed underline, but never split a matched
+   term across lines inside the transition question. */
+.story-outgoing-question-body .glossary-term {
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: keep-all;
+}
 
 .study-page-grid {
   display: grid;
@@ -2981,10 +3032,22 @@ code .formula-symbol sup {
   grid-template-columns: 34px minmax(0, 1fr);
   gap: 11px;
   align-items: start;
+  min-width: 0;
   padding: 11px 13px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
+}
+
+.worked-choice-option > p,
+.worked-choice-option > span,
+.worked-choice-option .formula-symbol {
+  min-width: 0;
+}
+
+.worked-choice-option p {
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 
 .worked-choice-option > span {

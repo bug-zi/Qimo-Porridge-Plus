@@ -100,6 +100,8 @@ type DemoSnapshot = {
   glossaries?: Record<string, GlossaryApiResponse>
   archive: ArchiveItemApiResponse[]
   runtimeModel: RuntimeModel
+  modelProfiles?: { active: string; profiles: Record<string, { baseUrl: string; model: string; hasApiKey: boolean }> }
+  backupModel?: { baseUrl: string; model: string; hasApiKey: boolean; connected: boolean }
   userProfile: UserProfilePrompt
   accountProfile?: AccountProfile
   embeddingProfile: EmbeddingProfile
@@ -768,10 +770,65 @@ const demoApi: ApiSurface = {
     return data.runtimeModel
   },
 
+  async getModelUsage() {
+    return {
+      promptTokens: 10240,
+      completionTokens: 8192,
+      totalTokens: 18432,
+      calls: 12,
+      failures: 0,
+      startedAt: '',
+      updatedAt: new Date().toISOString(),
+      currentCall: { model: '', startedAt: '' },
+      recent: [],
+    }
+  },
+
   async saveRuntimeModel(payload) {
     const data = await loadSnapshot()
     data.runtimeModel = { ...data.runtimeModel, baseUrl: payload.baseUrl, model: payload.model, connected: true, hasApiKey: payload.apiKey.length > 0 }
     return data.runtimeModel
+  },
+
+  async getModelProfiles() {
+    const data = await loadSnapshot()
+    data.modelProfiles ??= {
+      active: 'custom',
+      profiles: {
+        custom: { baseUrl: data.runtimeModel.baseUrl, model: data.runtimeModel.model, hasApiKey: true },
+      },
+    }
+    return data.modelProfiles
+  },
+
+  async saveModelProfile(provider, payload) {
+    const profiles = await this.getModelProfiles()
+    const existing = profiles.profiles[provider] ?? { baseUrl: '', model: '', hasApiKey: false }
+    profiles.profiles[provider] = {
+      baseUrl: payload.baseUrl,
+      model: payload.model,
+      hasApiKey: Boolean(payload.apiKey) || existing.hasApiKey,
+    }
+    profiles.active = provider
+    return profiles
+  },
+
+  async getBackupModel() {
+    const data = await loadSnapshot()
+    data.backupModel ??= { baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-5.2', hasApiKey: false, connected: false }
+    return data.backupModel
+  },
+
+  async saveBackupModel(payload) {
+    const data = await loadSnapshot()
+    const current = await this.getBackupModel()
+    data.backupModel = {
+      baseUrl: payload.baseUrl,
+      model: payload.model,
+      hasApiKey: Boolean(payload.apiKey) || current.hasApiKey,
+      connected: true,
+    }
+    return data.backupModel
   },
 
   async getAccountProfile() {

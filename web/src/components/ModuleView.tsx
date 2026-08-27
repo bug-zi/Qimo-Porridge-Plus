@@ -99,9 +99,11 @@ import {
   getCourseMaterialConvertedFileUrl,
   getCourseMaterialFileUrl,
   getCourseMaterialPreview,
+  getModelUsage,
   listMcpServers,
   submitCourseExternalSource,
 } from '../apiClient'
+import type { ModelUsageSnapshot } from '../api'
 import { SettingsView } from './SettingsView'
 import { PlanningView } from './PlanningView'
 
@@ -1045,6 +1047,37 @@ function PlanView({
   const [generationActionError, setGenerationActionError] = useState('')
   const activeGenerationJob = strategyGenerationJob?.courseId === course.id ? strategyGenerationJob : null
   const isGeneratingPlan = activeGenerationJob && ['queued', 'running'].includes(activeGenerationJob.job.status)
+  const [modelUsage, setModelUsage] = useState<ModelUsageSnapshot | null>(null)
+
+  const [usageNowTick, setUsageNowTick] = useState(0)
+
+  useEffect(() => {
+    if (!isGeneratingPlan) return
+    let isCancelled = false
+    const loadUsage = () => {
+      void getModelUsage()
+        .then((usage) => {
+          if (!isCancelled) setModelUsage(usage)
+        })
+        .catch(() => {
+          // 用量读取失败不影响生成进度展示
+        })
+    }
+    loadUsage()
+    const timer = window.setInterval(loadUsage, 10000)
+    return () => {
+      isCancelled = true
+      window.clearInterval(timer)
+    }
+  }, [isGeneratingPlan])
+
+  useEffect(() => {
+    if (!isGeneratingPlan) return
+    const timer = window.setInterval(() => setUsageNowTick((current) => current + 1), 1000)
+    return () => {
+      window.clearInterval(timer)
+    }
+  }, [isGeneratingPlan])
   const lessonTasks = tasks.filter((task) => task.kind !== 'orientation')
   const pendingContentCount = lessonTasks.filter((task) => !task.studyGuide).length
   const completedContentCount = lessonTasks.filter((task) => task.studyGuide).length
@@ -1134,8 +1167,14 @@ function PlanView({
 
       {readabilityReview && (
         <section className={`readability-review-banner is-${readabilityReview.status}`}>
-          <div className="readability-review-score"><strong>{readabilityReview.score}</strong><span>易读性</span></div>
-          <div><strong>{readabilityReview.status === 'passed' ? '课程排版审核通过' : '课程排版有改进建议'}</strong><p>{readabilityReview.summary} · 已审核 {readabilityReview.reviewedLessonCount} 课 · 最近审核 {new Date(readabilityReview.reviewedAt).toLocaleString('zh-CN')}</p></div>
+          <div className="readability-review-score">
+            <strong>{readabilityReview.pendingLessonCount > 0 ? '—' : readabilityReview.score}</strong>
+            <span>{readabilityReview.pendingLessonCount > 0 ? '尚未完成' : '易读性'}</span>
+          </div>
+          <div>
+            <strong>{readabilityReview.pendingLessonCount > 0 ? '课程排版审核尚未完成' : readabilityReview.status === 'passed' ? '课程排版审核通过' : '课程排版有改进建议'}</strong>
+            <p>{readabilityReview.pendingLessonCount > 0 ? ('当前仅审核 ' + readabilityReview.reviewedLessonCount + ' 课，仍有 ' + readabilityReview.pendingLessonCount + ' 课未生成，暂不计算全课程评分。') : readabilityReview.summary} · 最近审核 {new Date(readabilityReview.reviewedAt).toLocaleString('zh-CN')}</p>
+          </div>
           <div className="readability-review-counts"><span>{readabilityReview.passedLessonCount} 课通过</span><span>{readabilityReview.attentionLessonCount} 课关注</span>{readabilityReview.pendingLessonCount > 0 && <span>{readabilityReview.pendingLessonCount} 课待生成</span>}</div>
         </section>
       )}
@@ -1152,18 +1191,38 @@ function PlanView({
                 : activeGenerationJob?.job.status === 'cancelled'
                   ? '课程内容生成已结束'
                 : activeGenerationJob?.job.status === 'completed'
-                  ? pendingContentCount > 0 ? '本批课程已生成完成' : '复习主线已生成完成'
+                  ? pendingContentCount > 0 ? `本批已完成，仍有 ${pendingContentCount} 课待生成` : '复习主线已全部生成完成'
                   : activeGenerationJob
                     ? '复习主线正在后台生成'
                     : '课程内容等待继续生成'}
             </strong>
             <p>
               {activeGenerationJob
-                ? `已运行 ${activeGenerationJob.elapsedSeconds} 秒 · 已完成 ${completedContentCount}/${completedContentCount + pendingContentCount} 节`
+                ? activeGenerationJob.job.status === 'completed'
+                  ? `本批结束 · 已完成 ${completedContentCount}/${completedContentCount + pendingContentCount} 节 · ${pendingContentCount > 0 ? `仍有 ${pendingContentCount} 课待生成` : '全部课程已完成'}`
+                  : `已运行 ${activeGenerationJob.elapsedSeconds} 秒 · 已完成 ${completedContentCount}/${completedContentCount + pendingContentCount} 节`
                 : `已完成 ${completedContentCount} 课，待生成 ${pendingContentCount} 课`}
               {activeGenerationJob?.job.status === 'running' ? ` · 第 ${activeGenerationJob.job.attempts} 次执行` : ''}
               {activeGenerationJob?.job.status === 'queued' ? ' · 等待后台 worker 接手' : ''}
+              {modelUsage && modelUsage.calls + modelUsage.failures > 0
+                ? ` · 已调用 ${modelUsage.calls} 次${modelUsage.failures ? `（失败 ${modelUsage.failures}）` : ''} · tokens ${modelUsage.totalTokens.toLocaleString()}（入 ${modelUsage.promptTokens.toLocaleString()} / 出 ${modelUsage.completionTokens.toLocaleString()}）`
+                : ''}
+              {modelUsage?.currentCall?.startedAt && isGeneratingPlan
+                ? (() => {
+                    void usageNowTick
+                    const elapsedSeconds = Math.max(0, Math.floor((Date.now() - new Date(modelUsage.currentCall.startedAt).getTime()) / 1000))
+                    const firstCallHint = modelUsage && modelUsage.calls + modelUsage.failures === 0 && elapsedSeconds < 480 ? '，首节生成约需 5-8 分钟' : ''
+                    return ` · 模型调用进行中（${modelUsage.currentCall.model || '模型'}，已 ${elapsedSeconds}s${firstCallHint}）`
+                  })()
+                : isGeneratingPlan
+                  ? ' · 正在等待模型响应'
+                  : ''}
             </p>
+            {modelUsage && isGeneratingPlan && modelUsage.recent.length > 0 && (
+              <p className="plan-generation-usage-recent">
+                最近调用：{modelUsage.recent[modelUsage.recent.length - 1].model} · +{modelUsage.recent[modelUsage.recent.length - 1].totalTokens.toLocaleString()} tokens · {modelUsage.recent[modelUsage.recent.length - 1].at.slice(11, 19)}
+              </p>
+            )}
             {activeGenerationJob?.job.error && <p role="alert">{activeGenerationJob.job.error}</p>}
             {generationActionError && <p role="alert">{generationActionError}</p>}
           </div>
@@ -2592,10 +2651,41 @@ function studyConceptTitle(title: string) {
 }
 
 function WorkedExampleQuestion({ text }: { text: string }) {
-  // Only A/B/C/D multiple-choice markers belong in the two-column choice-card layout. Circled
-  // ①②③ markers are ordinary inline subquestions; parsing them as choices caused glossary term
-  // spans in the question to be squeezed into narrow columns and appear one word per line.
-  return <p className="worked-example-question-text"><FormulaText text={text} /></p>
+  // Keep the question stem in a normal text flow, but promote genuine A/B/C/D markers to
+  // separate option rows. This prevents a generated multiple-choice example from becoming
+  // one dense paragraph, while deliberately leaving circled markers such as ①②③ inline.
+  const normalized = text.replace(/\r\n?/g, '\n').replace(/[ \t]+/g, ' ').trim()
+  // Match the marker itself (not the preceding whitespace/punctuation). The previous
+  // expression included the boundary in match.index, so an A marker immediately after a
+  // question mark/colon could be treated as part of the stem and disappear from the list.
+  // The boundary is a negative lookbehind so match.index always points at the
+  // option marker itself; consuming the ^/whitespace boundary would swallow A.
+  const markerPattern = /(?<![A-Za-z0-9Ａ-Ｄ])([A-DＡ-Ｄ])\s*[.．、)）:：]\s*/gu
+  const matches = [...normalized.matchAll(markerPattern)]
+  if (matches.length < 2) return <p className="worked-example-question-text"><FormulaText text={normalized} /></p>
+
+  const first = matches[0]
+  const stem = normalized.slice(0, first.index ?? 0).trim()
+  const options = matches.map((match, index) => {
+    const start = (match.index ?? 0) + match[0].length
+    const end = index + 1 < matches.length ? (matches[index + 1].index ?? normalized.length) : normalized.length
+    return { label: match[1].replace(/[Ａ-Ｄ]/, (value) => String.fromCharCode(value.charCodeAt(0) - 65248)), text: normalized.slice(start, end).trim() }
+  }).filter((option) => option.text)
+  if (options.length < 2) return <p className="worked-example-question-text"><FormulaText text={normalized} /></p>
+
+  return (
+    <div className="worked-example-question">
+      {stem && <p className="worked-example-question-text"><FormulaText text={stem} /></p>}
+      <div className="worked-choice-list" role="list" aria-label="例题选项">
+        {options.map((option) => (
+          <div className="worked-choice-option" role="listitem" key={option.label}>
+            <span>{option.label}</span>
+            <p><FormulaText text={option.text} /></p>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
 }
 
 function buildStudyGuide(task: PlanTask, knowledgePoint: KnowledgePoint | undefined, _courseName: string): StudyGuide {
@@ -3312,7 +3402,14 @@ function StudyTaskView({
         ) : null}
         {section.kind === 'examples' ? standardStudyPages[2].content : null}
         {section.kind === 'self-check' ? standardStudyPages[3].content : null}
-        {storyContext && section.kind === 'self-check' && <p className="story-outgoing-question"><strong>留给下一段的问题</strong><StudyFormulaText text={storyContext.outgoingQuestion} /></p>}
+        {storyContext && section.kind === 'self-check' && storyContext.outgoingQuestion && (
+          <aside className="story-outgoing-question">
+            <strong>留给下一段的问题</strong>
+            <div className="story-outgoing-question-body">
+              <StudyFormulaText text={storyContext.outgoingQuestion.replace(/\s+/g, ' ').trim().replace(/\s*([和与及])\s*/g, '\u00a0$1\u00a0')} />
+            </div>
+          </aside>
+        )}
       </div>
     ),
   }))

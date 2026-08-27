@@ -23,23 +23,26 @@ import {
 import {
   deleteAccountAvatar,
   discoverMcpServer,
+  getBackupModel,
   getBilibiliCredentialStatus,
   getEmbeddingProfile,
   getAccountProfile,
   getKnowledgeBaseStatus,
+  getModelProfiles,
   getUserProfilePrompt,
   listMcpServers,
   rebuildKnowledgeEmbeddings,
+  saveBackupModel,
   saveEmbeddingProfile,
+  saveModelProfile,
   saveMcpServer,
-  saveRuntimeModel,
   saveAccountProfile,
   saveUserProfilePrompt,
   testEmbeddingProfile,
-  toRuntimeModelProfile,
   uploadAccountAvatar,
   isDemoMode,
 } from '../apiClient'
+import type { BackupModelProfile, ModelProfilesResponse } from '../api'
 import { BilibiliCredentialDialog } from './BilibiliCredentialDialog'
 import { authFetch, type AuthUser } from '../auth'
 import type {
@@ -298,6 +301,20 @@ export function SettingsView({
   const [userProfileUpdatedAt, setUserProfileUpdatedAt] = useState('')
   const [userProfileAction, setUserProfileAction] = useState<'idle' | 'loading' | 'saving'>('loading')
   const [userProfileMessage, setUserProfileMessage] = useState('')
+  const [savedProfiles, setSavedProfiles] = useState<ModelProfilesResponse | null>(null)
+  const [isAvailableModelsExpanded, setIsAvailableModelsExpanded] = useState(false)
+  const [backupDraft, setBackupDraft] = useState<BackupModelProfile & { apiKey: string }>({
+    baseUrl: '',
+    model: '',
+    apiKey: '',
+    hasApiKey: false,
+    connected: false,
+  })
+  const [backupAction, setBackupAction] = useState<'idle' | 'testing' | 'saving'>('idle')
+  const [backupMessage, setBackupMessage] = useState('')
+  const [backupTested, setBackupTested] = useState(false)
+  const [backupAvailableModels, setBackupAvailableModels] = useState<string[]>([])
+  const [isBackupModelsExpanded, setIsBackupModelsExpanded] = useState(false)
   const draftRef = useRef(draft)
 
   useEffect(() => {
@@ -333,6 +350,35 @@ export function SettingsView({
       isCancelled = true
     }
   }, [courseId])
+
+  useEffect(() => {
+    let isCancelled = false
+    void getModelProfiles()
+      .then((profiles) => {
+        if (!isCancelled) setSavedProfiles(profiles)
+      })
+      .catch(() => {
+        // 读取失败时按无档案处理：沿用预设值，不影响保存流程。
+      })
+    void getBackupModel()
+      .then((backup) => {
+        if (!isCancelled) {
+          setBackupDraft((current) => ({
+            ...current,
+            baseUrl: backup.baseUrl,
+            model: backup.model,
+            hasApiKey: backup.hasApiKey,
+            connected: backup.connected,
+          }))
+        }
+      })
+      .catch(() => {
+        if (!isCancelled) setBackupMessage('无法读取备用模型配置。')
+      })
+    return () => {
+      isCancelled = true
+    }
+  }, [])
 
   useEffect(() => {
     let isCancelled = false
@@ -473,18 +519,22 @@ export function SettingsView({
 
   function selectProvider(provider: ModelProvider) {
     const preset = getProviderPreset(provider)
+    // 优先使用该档案已保存的配置：切换厂商不再丢失各自已保存的 Base URL / 模型 / Key。
+    const saved = savedProfiles?.profiles[provider]
     setDraft((current) => ({
       ...current,
       provider,
-      baseUrl: preset.baseUrl,
-      model: preset.model,
-      hasApiKey: current.hasApiKey,
+      baseUrl: saved?.baseUrl || preset.baseUrl,
+      model: saved?.model || preset.model,
+      apiKey: '',
+      hasApiKey: saved?.hasApiKey ?? false,
       availableModels: undefined,
       supportsVision: preset.supportsVision,
       status: 'unconfigured',
       statusMessage: '',
       lastTestedAt: undefined,
     }))
+    setIsAvailableModelsExpanded(false)
   }
 
   async function saveProfile() {
@@ -508,16 +558,18 @@ export function SettingsView({
     onModelProfileChange(savingProfile)
 
     try {
-      const runtimeModel = await saveRuntimeModel({
+      const profiles = await saveModelProfile(draft.provider, {
         baseUrl: draft.baseUrl,
         apiKey: draft.apiKey,
         model: draft.model,
       })
+      setSavedProfiles(profiles)
       const nextProfile: ModelProfile = {
-        ...toRuntimeModelProfile(runtimeModel),
-        supportsVision: draft.supportsVision,
+        ...draft,
+        apiKey: '',
+        hasApiKey: true,
         status: 'saved',
-        statusMessage: '配置已保存到本机',
+        statusMessage: `配置已保存到本机（当前使用 ${getProviderPreset(draft.provider).label}）`,
         lastTestedAt: draft.lastTestedAt,
       }
       setDraft(nextProfile)
@@ -530,6 +582,59 @@ export function SettingsView({
       }
       setDraft(failedProfile)
       onModelProfileChange(failedProfile)
+    }
+  }
+
+  async function testBackupConnection() {
+    if (!backupDraft.baseUrl.trim() || (!backupDraft.apiKey.trim() && !backupDraft.hasApiKey)) {
+      setBackupMessage('请先填写备用模型的 Base URL 和 API Key。')
+      return
+    }
+    setBackupAction('testing')
+    setBackupMessage('')
+    try {
+      const result = await requestAvailableModels({
+        ...draft,
+        baseUrl: backupDraft.baseUrl,
+        apiKey: backupDraft.apiKey,
+        model: backupDraft.model,
+        provider: 'custom',
+      })
+      setBackupTested(true)
+      setBackupAvailableModels(result.available_models ?? [])
+      setIsBackupModelsExpanded(false)
+      if (result.success) {
+        setBackupMessage(result.message)
+      } else {
+        setBackupMessage(result.message)
+      }
+    } catch (error) {
+      setBackupTested(false)
+      setBackupMessage(error instanceof Error ? error.message : '备用模型连接失败')
+    } finally {
+      setBackupAction('idle')
+    }
+  }
+
+  async function saveBackupSettings() {
+    if (!backupDraft.baseUrl.trim() || !backupDraft.model.trim() || (!backupDraft.apiKey.trim() && !backupDraft.hasApiKey)) {
+      setBackupMessage('请先填写备用模型的 Base URL、模型名和 API Key。')
+      return
+    }
+    setBackupAction('saving')
+    setBackupMessage('')
+    try {
+      const saved = await saveBackupModel({
+        baseUrl: backupDraft.baseUrl,
+        apiKey: backupDraft.apiKey,
+        model: backupDraft.model,
+      })
+      setBackupDraft((current) => ({ ...current, apiKey: '', hasApiKey: saved.hasApiKey, connected: saved.connected, baseUrl: saved.baseUrl, model: saved.model }))
+      setBackupMessage(saved.connected ? '备用模型已保存，主模型失败时将自动切换。' : '备用模型已保存，但配置不完整（缺少 API Key 或模型名）。')
+    } catch (error) {
+      setBackupMessage(error instanceof Error ? error.message : '备用模型保存失败')
+    } finally {
+      setBackupAction('idle')
     }
   }
 
@@ -819,7 +924,7 @@ export function SettingsView({
   const currentStatus = statusContent(draft)
   const StatusIcon = currentStatus.icon
   const availableModels = draft.availableModels ?? []
-  const hasAvailableModels = draft.provider === 'custom' && availableModels.length > 0
+  const hasAvailableModels = availableModels.length > 0
   const selectedModelValue = availableModels.includes(draft.model) ? draft.model : ''
   const selectedUiFont = uiFontOptions.find((font) => font.id === uiFont) ?? uiFontOptions[0]
   const selectedUiFontSize = uiFontSizeOptions.includes(uiFontSize) ? uiFontSize : 100
@@ -839,10 +944,6 @@ export function SettingsView({
           <p className="page-kicker"><Sparkles size={15} /> 本机配置，仅在需要时发送至模型服务</p>
           <h1>设置</h1>
           <p>选择模型、保存连接参数，并为 AI 伴学启用适合你的能力。</p>
-        </div>
-        <div className={`connection-status ${currentStatus.tone}`}>
-          <StatusIcon size={16} />
-          <span>{currentStatus.label}</span>
         </div>
       </section>
 
@@ -939,6 +1040,11 @@ export function SettingsView({
           {accountProfileMessage && <span className="settings-message">{accountProfileMessage}</span>}
         </div>
       </section>
+
+      <div className={`connection-status ${currentStatus.tone} settings-connection-status`}>
+        <StatusIcon size={16} />
+        <span>{currentStatus.label}</span>
+      </div>
 
       <div className="settings-layout">
         <section className="settings-panel model-settings-panel">
@@ -1043,6 +1149,122 @@ export function SettingsView({
             <button className="primary-button" type="button" onClick={saveProfile}>
               <Save size={16} /> 保存配置
             </button>
+            {availableModels.length > 0 && (
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => setIsAvailableModelsExpanded((current) => !current)}
+              >
+                {isAvailableModelsExpanded ? '收起可用模型' : `查看可用模型（${availableModels.length}）`}
+              </button>
+            )}
+          </div>
+
+          {isAvailableModelsExpanded && availableModels.length > 0 && (
+            <div className="available-models-list">
+              <p>该服务当前可用模型（点击模型名填入上方输入框）：</p>
+              <ul>
+                {availableModels.map((model) => (
+                  <li key={model}>
+                    <button type="button" onClick={() => updateDraft('model', model)}>
+                      {model}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div className="backup-model-settings">
+            <header className="settings-panel-heading">
+              <div className="settings-heading-icon secondary"><Sparkles size={19} /></div>
+              <div>
+                <h2>备用模型</h2>
+                <p>主模型连接失败或连续出错时，自动切换到该模型继续生成；两者互不影响。</p>
+              </div>
+            </header>
+
+            <div className="model-form-grid">
+              <label className="settings-field settings-field-wide">
+                <span>Base URL</span>
+                <div className="field-with-icon">
+                  <Link2 size={16} />
+                  <input
+                    value={backupDraft.baseUrl}
+                    placeholder="https://open.bigmodel.cn/api/paas/v4"
+                    autoComplete="url"
+                    onChange={(event) => setBackupDraft((current) => ({ ...current, baseUrl: event.target.value }))}
+                  />
+                </div>
+              </label>
+              <label className="settings-field">
+                <span>模型名</span>
+                <input
+                  value={backupDraft.model}
+                  placeholder="例如：glm-5.2"
+                  onChange={(event) => setBackupDraft((current) => ({ ...current, model: event.target.value }))}
+                />
+              </label>
+              <label className="settings-field">
+                <span>API Key</span>
+                <div className="field-with-icon">
+                  <KeyRound size={16} />
+                  <input
+                    type={isApiKeyVisible ? 'text' : 'password'}
+                    value={backupDraft.apiKey}
+                    placeholder={backupDraft.hasApiKey ? '已保存到本机，留空继续使用' : '仅保存在本机'}
+                    autoComplete="off"
+                    onChange={(event) => setBackupDraft((current) => ({ ...current, apiKey: event.target.value }))}
+                  />
+                  <button
+                    type="button"
+                    aria-label={isApiKeyVisible ? '隐藏 API Key' : '显示 API Key'}
+                    onClick={() => setIsApiKeyVisible((current) => !current)}
+                  >
+                    {isApiKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
+              </label>
+            </div>
+
+            <div className="settings-actions">
+              <button className="secondary-button" type="button" onClick={testBackupConnection}>
+                {backupAction === 'testing' ? <LoaderCircle className="is-spinning" size={16} /> : <PlugZap size={16} />}
+                测试连接
+              </button>
+              <button className="primary-button" type="button" onClick={saveBackupSettings}>
+                <Save size={16} /> 保存备用模型
+              </button>
+              {backupAvailableModels.length > 0 && (
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() => setIsBackupModelsExpanded((current) => !current)}
+                >
+                  {isBackupModelsExpanded ? '收起可用模型' : `查看可用模型（${backupAvailableModels.length}）`}
+                </button>
+              )}
+              {backupMessage && (
+                <span className={`settings-message ${backupTested && backupAction === 'idle' && backupMessage.startsWith('连接成功') ? 'is-success' : ''}`}>
+                  {backupMessage}
+                </span>
+              )}
+            </div>
+
+            {isBackupModelsExpanded && backupAvailableModels.length > 0 && (
+              <div className="available-models-list">
+                <p>备用服务当前可用模型（点击模型名填入上方输入框）：</p>
+                <ul>
+                  {backupAvailableModels.map((model) => (
+                    <li key={model}>
+                      <button type="button" onClick={() => setBackupDraft((current) => ({ ...current, model }))}>
+                        {model}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
 
           <div className="knowledge-settings">
