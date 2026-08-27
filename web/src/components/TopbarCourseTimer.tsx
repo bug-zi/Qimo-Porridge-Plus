@@ -2,8 +2,7 @@ import { Pause, Play, Square, X } from 'lucide-react'
 import { useCourseTimer } from '../hooks/useCourseTimer'
 
 /**
- * 顶栏课程计时器：常驻显示在 topbar，任意页面都可开始 / 暂停 / 记入 / 放弃。
- * 计时状态来自全局 CourseTimerProvider，跨页面不丢失。
+ * 顶栏课程自动计时器：工作台打开即计时，可暂停、继续、立即记入或放弃本段。
  */
 export function TopbarCourseTimer({
   activeCourseId,
@@ -23,7 +22,7 @@ export function TopbarCourseTimer({
           disabled={recording}
           onClick={() => start(activeCourseId, activeCourseName)}
         >
-          <Play size={14} /> 计时
+          <Play size={14} /> 开始计时
         </button>
       </div>
     )
@@ -40,19 +39,20 @@ export function TopbarCourseTimer({
         className="tct-toggle"
         type="button"
         disabled={recording}
-        aria-label={timer.running ? '暂停计时' : '继续计时'}
+        aria-label={timer.running ? '暂停自动计时' : '继续自动计时'}
+        title={timer.running ? '暂停' : '继续'}
         onClick={toggle}
       >
         {timer.running ? <Pause size={14} /> : <Play size={14} />}
       </button>
-      <span className="tct-time">{time}</span>
+      <span className="tct-time" title={timer.running ? '正在自动记录学习时长' : '计时已暂停'}>{time}</span>
       {showCourse && <span className="tct-course">{timer.courseName}</span>}
       <button
         className="tct-icon-btn"
         type="button"
         disabled={recording}
-        aria-label="记入本次时长"
-        title="记入"
+        aria-label="立即记入本次整分钟时长"
+        title="立即记入并开始新一段"
         onClick={() => {
           void stopAndRecord()
         }}
@@ -63,8 +63,8 @@ export function TopbarCourseTimer({
         className="tct-icon-btn"
         type="button"
         disabled={recording}
-        aria-label="放弃本次计时"
-        title="放弃"
+        aria-label="退出计时"
+        title="退出计时"
         onClick={discard}
       >
         <X size={13} />

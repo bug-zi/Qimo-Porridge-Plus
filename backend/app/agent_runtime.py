@@ -16,6 +16,11 @@ DATA_DIRECTORY = Path(__file__).resolve().parent.parent / "data"
 DATABASE_PATH = DATA_DIRECTORY / "exam_booster.db"
 
 
+class AgentJobCancelled(RuntimeError):
+    """Raised cooperatively when a persisted background job is cancelled."""
+
+
+
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
@@ -176,10 +181,29 @@ def initialize_agent_database() -> None:
                 terms_total INTEGER NOT NULL DEFAULT 0,
                 terms_active INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT NOT NULL DEFAULT '',
-                last_refreshed_at TEXT NOT NULL DEFAULT ''
+                last_refreshed_at TEXT NOT NULL DEFAULT '',
+                phase TEXT NOT NULL DEFAULT 'idle',
+                candidates_total INTEGER NOT NULL DEFAULT 0,
+                terms_completed INTEGER NOT NULL DEFAULT 0,
+                started_at TEXT NOT NULL DEFAULT '',
+                progress_updated_at TEXT NOT NULL DEFAULT ''
             );
             """
         )
+        glossary_state_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(glossary_refresh_state)").fetchall()
+        }
+        for column, definition in {
+            "phase": "TEXT NOT NULL DEFAULT 'idle'",
+            "candidates_total": "INTEGER NOT NULL DEFAULT 0",
+            "terms_completed": "INTEGER NOT NULL DEFAULT 0",
+            "started_at": "TEXT NOT NULL DEFAULT ''",
+            "progress_updated_at": "TEXT NOT NULL DEFAULT ''",
+        }.items():
+            if column not in glossary_state_columns:
+                connection.execute(f"ALTER TABLE glossary_refresh_state ADD COLUMN {column} {definition}")
+
         existing_columns = {
             str(row["name"])
             for row in connection.execute("PRAGMA table_info(mcp_servers)").fetchall()
@@ -366,6 +390,15 @@ def enqueue_agent_job(
     job_id = f"job-{uuid.uuid4().hex}"
     timestamp = _now()
     with _connection() as connection:
+        # Idempotent queueing: workspace polling may request the same maintenance
+        # job every 1.8 seconds. Reuse its active job instead of flooding FIFO.
+        active = connection.execute(
+            "SELECT id FROM agent_jobs WHERE course_id = ? AND job_type = ? "
+            "AND status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1",
+            (course_id, job_type),
+        ).fetchone()
+        if active is not None:
+            return str(active["id"])
         connection.execute(
             """
             INSERT INTO agent_jobs (
@@ -376,6 +409,56 @@ def enqueue_agent_job(
             (job_id, course_id, job_type, json.dumps(payload, ensure_ascii=False), max_attempts, timestamp, timestamp, timestamp),
         )
     return job_id
+
+
+def get_active_agent_job(course_id: str, job_type: str) -> dict[str, Any] | None:
+    """Return the newest active job so a refreshed client can resume polling it."""
+    initialize_agent_database()
+    with _connection() as connection:
+        row = connection.execute(
+            "SELECT id FROM agent_jobs WHERE course_id = ? AND job_type = ? "
+            "AND status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1",
+            (course_id, job_type),
+        ).fetchone()
+    return get_agent_job(str(row["id"])) if row is not None else None
+
+
+def cancel_agent_job(job_id: str) -> dict[str, Any]:
+    """Cancel a queued/running job; workers observe this flag cooperatively."""
+    initialize_agent_database()
+    timestamp = _now()
+    with _connection() as connection:
+        row = connection.execute("SELECT status FROM agent_jobs WHERE id = ?", (job_id,)).fetchone()
+        if row is None:
+            raise KeyError("Agent 后台任务不存在")
+        if str(row["status"]) in {"queued", "running"}:
+            connection.execute(
+                "UPDATE agent_jobs SET status = 'cancelled', error = '', lease_until = '', updated_at = ? WHERE id = ?",
+                (timestamp, job_id),
+            )
+    return get_agent_job(job_id)
+
+
+def is_agent_job_cancelled(job_id: str) -> bool:
+    initialize_agent_database()
+    with _connection() as connection:
+        row = connection.execute("SELECT status FROM agent_jobs WHERE id = ?", (job_id,)).fetchone()
+    return row is not None and str(row["status"]) == "cancelled"
+
+
+def delete_artifacts_for_run(run_id: str, artifact_types: list[str] | None = None) -> None:
+    """Permanently remove transient/checkpoint content produced by one run."""
+    if not run_id:
+        return
+    with _connection() as connection:
+        if artifact_types:
+            placeholders = ", ".join("?" for _ in artifact_types)
+            connection.execute(
+                f"DELETE FROM artifacts WHERE source_run_id = ? AND artifact_type IN ({placeholders})",
+                (run_id, *artifact_types),
+            )
+        else:
+            connection.execute("DELETE FROM artifacts WHERE source_run_id = ?", (run_id,))
 
 
 def get_agent_job(job_id: str) -> dict[str, Any]:
@@ -409,7 +492,14 @@ def _claim_job() -> dict[str, Any] | None:
             (now,),
         )
         row = connection.execute(
-            "SELECT * FROM agent_jobs WHERE status = 'queued' AND available_at <= ? ORDER BY created_at LIMIT 1",
+            "SELECT * FROM agent_jobs WHERE status = 'queued' AND available_at <= ? "
+            "ORDER BY CASE job_type "
+            "WHEN 'approve_strategy_documents' THEN 0 "
+            "WHEN 'external_source_import' THEN 1 "
+            "WHEN 'orientation_refresh' THEN 2 "
+            "WHEN 'glossary_refresh' THEN 3 "
+            "WHEN 'maintain_review_plan' THEN 4 "
+            "WHEN 'rebalance_daily_plan' THEN 5 ELSE 3 END, created_at LIMIT 1",
             (now,),
         ).fetchone()
         if row is None:
@@ -433,12 +523,15 @@ def _claim_job() -> dict[str, Any] | None:
 def _complete_job(job_id: str, result: dict[str, Any] | None = None) -> None:
     with _connection() as connection:
         connection.execute(
-            "UPDATE agent_jobs SET status = 'completed', result_json = ?, lease_until = '', updated_at = ? WHERE id = ?",
+            "UPDATE agent_jobs SET status = 'completed', result_json = ?, lease_until = '', updated_at = ? "
+            "WHERE id = ? AND status = 'running'",
             (json.dumps(result or {}, ensure_ascii=False), _now(), job_id),
         )
 
 
 def _fail_job(job: dict[str, Any], error: Exception) -> None:
+    if isinstance(error, AgentJobCancelled) or is_agent_job_cancelled(job["id"]):
+        return
     exhausted = job["attempts"] >= job["maxAttempts"]
     status = "failed" if exhausted else "queued"
     delay_seconds = min(60, 2 ** job["attempts"])
@@ -448,6 +541,20 @@ def _fail_job(job: dict[str, Any], error: Exception) -> None:
             "UPDATE agent_jobs SET status = ?, error = ?, available_at = ?, lease_until = '', updated_at = ? WHERE id = ?",
             (status, str(error), available_at, _now(), job["id"]),
         )
+
+
+def _renew_job_lease(job_id: str) -> None:
+    lease_until = (datetime.now() + timedelta(minutes=10)).isoformat(timespec="seconds")
+    with _connection() as connection:
+        connection.execute(
+            "UPDATE agent_jobs SET lease_until = ?, updated_at = ? WHERE id = ? AND status = 'running'",
+            (lease_until, _now(), job_id),
+        )
+
+
+def _lease_heartbeat(job_id: str, stop_event: threading.Event) -> None:
+    while not stop_event.wait(60):
+        _renew_job_lease(job_id)
 
 
 class AgentJobWorker:
@@ -474,14 +581,23 @@ class AgentJobWorker:
             if job is None:
                 self._stop_event.wait(0.75)
                 continue
+            heartbeat_stop = threading.Event()
+            heartbeat = threading.Thread(
+                target=_lease_heartbeat, args=(job["id"], heartbeat_stop), daemon=True
+            )
+            heartbeat.start()
             try:
                 handler = self._handlers.get(job["jobType"])
                 if handler is None:
                     raise RuntimeError(f"未注册后台任务处理器：{job['jobType']}")
-                result = handler(job["courseId"], job["payload"])
+                payload = {**job["payload"], "_jobId": job["id"]}
+                result = handler(job["courseId"], payload)
                 _complete_job(job["id"], result)
             except Exception as error:
                 _fail_job(job, error)
+            finally:
+                heartbeat_stop.set()
+                heartbeat.join(timeout=1)
 
 
 def create_adjustment_proposal(
@@ -895,6 +1011,11 @@ def get_glossary_refresh_state(course_id: str) -> dict[str, Any]:
             "termsActive": 0,
             "lastError": "",
             "lastRefreshedAt": "",
+            "phase": "idle",
+            "candidatesTotal": 0,
+            "termsCompleted": 0,
+            "startedAt": "",
+            "progressUpdatedAt": "",
         }
     return {
         "courseId": str(row["course_id"]),
@@ -904,11 +1025,19 @@ def get_glossary_refresh_state(course_id: str) -> dict[str, Any]:
         "termsActive": int(row["terms_active"]),
         "lastError": str(row["last_error"]),
         "lastRefreshedAt": str(row["last_refreshed_at"]),
+        "phase": str(row["phase"]),
+        "candidatesTotal": int(row["candidates_total"]),
+        "termsCompleted": int(row["terms_completed"]),
+        "startedAt": str(row["started_at"]),
+        "progressUpdatedAt": str(row["progress_updated_at"]),
     }
 
 
 def save_glossary_refresh_state(course_id: str, **fields: Any) -> dict[str, Any]:
-    allowed = {"status", "content_signature", "terms_total", "terms_active", "last_error", "last_refreshed_at"}
+    allowed = {
+        "status", "content_signature", "terms_total", "terms_active", "last_error", "last_refreshed_at",
+        "phase", "candidates_total", "terms_completed", "started_at", "progress_updated_at",
+    }
     updates = {key: value for key, value in fields.items() if key in allowed}
     with _connection() as connection:
         row = connection.execute(

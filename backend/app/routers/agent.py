@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from ..agent_runtime import get_agent_job, get_agent_run
+from ..agent_runtime import cancel_agent_job, get_agent_job, get_agent_run
 from ..study_service import agent_chat, agent_chat_stream
 from .deps import get_connection, course_is_owned, current_owner_id, require_course_ownership
 
@@ -83,6 +83,21 @@ def agent_job_status(job_id: str, owner_id: str = Depends(current_owner_id)) -> 
         raise HTTPException(status_code=404, detail=str(error)) from error
     _ensure_agent_resource_owned(job["courseId"], owner_id)
     return job
+
+
+@router.post("/api/agent-jobs/{job_id}/cancel")
+def cancel_background_agent_job(
+    job_id: str,
+    owner_id: str = Depends(current_owner_id),
+) -> dict[str, Any]:
+    try:
+        job = get_agent_job(job_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    _ensure_agent_resource_owned(job["courseId"], owner_id)
+    if job["jobType"] != "approve_strategy_documents":
+        raise HTTPException(status_code=409, detail="该任务不支持在此结束")
+    return cancel_agent_job(job_id)
 
 
 def _ensure_agent_resource_owned(course_id: str, owner_id: str) -> None:

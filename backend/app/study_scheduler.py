@@ -339,6 +339,84 @@ def _format_scheduling_reason(
     return "；".join(parts)
 
 
+def _stable_mainline_tasks(
+    tasks: list[dict], points: list[dict], modules: list[dict] | None = None
+) -> list[dict]:
+    """Stable topological repair using module/planner position, never study metrics."""
+    point_by_id = {str(point.get("id", "")): point for point in points if isinstance(point, dict)}
+    module_order = {
+        str(module.get("id", "")): _as_int(module.get("order"), index + 1)
+        for index, module in enumerate(modules or []) if isinstance(module, dict)
+    }
+    original_point_index: dict[str, int] = {}
+    task_positions_by_point: dict[str, list[int]] = {}
+    for index, task in enumerate(tasks):
+        pid = str(task.get("knowledgePointId") or "")
+        task_positions_by_point.setdefault(pid, []).append(index)
+        if pid in point_by_id and pid not in original_point_index:
+            original_point_index[pid] = index
+    for index, point in enumerate(points, start=len(tasks)):
+        pid = str(point.get("id") or "")
+        original_point_index.setdefault(pid, index)
+
+    # A valid Planner sequence is authoritative down to individual lessons. This
+    # keeps recap/check lessons at their intended position instead of grouping all
+    # tasks that happen to share one knowledge point.
+    last_module_order = -1
+    module_sequence_valid = True
+    for task in tasks:
+        point = point_by_id.get(str(task.get("knowledgePointId") or ""), {})
+        current_module_order = module_order.get(str(point.get("moduleId") or ""), last_module_order)
+        if current_module_order < last_module_order:
+            module_sequence_valid = False
+            break
+        last_module_order = current_module_order
+    dependencies_valid = all(
+        not task_positions_by_point.get(pid)
+        or not task_positions_by_point.get(str(prereq))
+        or max(task_positions_by_point[str(prereq)]) < min(task_positions_by_point[pid])
+        for pid, point in point_by_id.items()
+        for prereq in (point.get("prerequisites") or [])
+    )
+    if module_sequence_valid and dependencies_valid:
+        return list(tasks)
+
+    def mainline_key(pid: str) -> tuple[int, int]:
+        point = point_by_id.get(pid, {})
+        mid = str(point.get("moduleId") or "")
+        # Valid declared modules define chapter blocks; otherwise retain Planner order.
+        return (module_order.get(mid, len(module_order) + 1), original_point_index.get(pid, 999999))
+
+    indegree = {pid: 0 for pid in point_by_id}
+    outgoing: dict[str, list[str]] = {pid: [] for pid in point_by_id}
+    for pid, point in point_by_id.items():
+        for prereq in point.get("prerequisites") or []:
+            prereq = str(prereq)
+            if prereq in point_by_id and prereq != pid:
+                outgoing[prereq].append(pid)
+                indegree[pid] += 1
+    ready = sorted((pid for pid, degree in indegree.items() if degree == 0), key=mainline_key)
+    ordered_ids: list[str] = []
+    while ready:
+        pid = ready.pop(0)
+        ordered_ids.append(pid)
+        for child in outgoing[pid]:
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                ready.append(child)
+                ready.sort(key=mainline_key)
+    if len(ordered_ids) != len(point_by_id):
+        ordered_ids.extend(sorted((pid for pid in point_by_id if pid not in ordered_ids), key=mainline_key))
+    rank = {pid: index for index, pid in enumerate(ordered_ids)}
+    indexed = list(enumerate(tasks))
+    return [
+        task for _, task in sorted(
+            indexed,
+            key=lambda pair: (rank.get(str(pair[1].get("knowledgePointId") or ""), len(rank)), pair[0]),
+        )
+    ]
+
+
 def schedule_tasks(
     tasks: list[dict],
     points: list[dict],
@@ -347,10 +425,14 @@ def schedule_tasks(
     daily_minutes: int,
     modules: list[dict] | None = None,
 ) -> list[str]:
-    """生成时确定性调度：按拓扑序拉平任务并装包到复习日，写 day/order/schedulingReason。
+    """生成时确定性调度：保留 Planner 的章节主线并装包到复习日。
+
+    tasks 的原始序列是 Content Planner 根据主资料目录给出的权威主线。前置依赖
+    只用于解释与校验，不能按难度、权重或掌握度重新排列整门课程。调度器仅在
+    不改变相对顺序的前提下分配 day/order。
 
     - session_days：复习日序列（可能稀疏，如 [1,4,7,10]），作为箱子序列。
-    - 每箱容量 daily_minutes；任务放入第一个剩余容量足够的箱子；无箱可放 → 末日 + warning。
+    - 每箱容量 daily_minutes；任务按主线依次装箱；无箱可放 → 末日 + warning。
     """
     warnings: list[str] = []
     if not session_days:
@@ -365,12 +447,12 @@ def schedule_tasks(
         for point in points
         if isinstance(point, dict)
     }
-    kp_order = topological_rank(points, modules)
-
+    # 保留输入任务顺序。旧实现通过 topological_rank 按 difficulty/weight/mastery
+    # 重建全量顺序，导致教材章节交错；这些属性只能影响内容深度，不能影响主线。
     remaining_capacity = {day: daily_minutes for day in session_days}
     placed: dict[int, list[dict]] = {day: [] for day in session_days}
 
-    for task in _tasks_by_kp_in_order(rest, kp_order):
+    for task in _stable_mainline_tasks(rest, points, modules):
         duration = max(5, _as_int(task.get("duration"), 60))
         target_day = next(
             (
@@ -413,18 +495,13 @@ def schedule_tasks(
 
 
 def _legacy_sort(tasks: list[dict], points: list[dict]) -> None:
-    """空图降级：精确复刻旧的 (day, mastery[kp], -weight) 排序 + 全局重编 order。"""
+    """空图降级：保持已生成的 day/order 主线，只做全局 order 规整。"""
     orientation, rest = split_orientation(tasks)
-    order_by_point = {
-        str(point.get("id", "")): _as_int(point.get("mastery"), 0)
-        for point in points
-        if isinstance(point, dict)
-    }
     rest.sort(
         key=lambda task: (
             _as_int(task.get("day"), 9),
-            order_by_point.get(str(task.get("knowledgePointId")), 100),
-            -_as_int(task.get("weight"), 0),
+            _as_int(task.get("order"), 9999),
+            str(task.get("id", "")),
         )
     )
     for index, task in enumerate(rest, start=1):
@@ -441,13 +518,12 @@ def reprioritize_pending(
     daily_minutes: int,
     modules: list[dict] | None = None,
 ) -> list[str]:
-    """做题失分后的动态重排（DAG 约束内）。
+    """做题失分后的动态调整（DAG 约束内）。
 
-    空图 → 旧排序键降级（行为与改造前逐字段一致）。
-    DAG 模式：就绪集 Kahn 贪心——每轮从"前置均已完成"的就绪知识点中按
-    (有 high 任务优先, difficulty 升序, weight 降序, 拓扑序) 挑一个放置；
-    失分知识点（priority 已被置 high）在其直接前置放置后立刻插队，
-    可越过同层无关知识点，但绝不超过任何未完成前置。
+    失分响应只允许通过任务 priority/duration/题量等上游字段增加强度；本函数不再
+    因 high priority 或低 mastery 改变主线顺序。空图保持已生成的 day/order 主线。
+    DAG 模式只在真实前置依赖要求下校正顺序：就绪集 Kahn 贪心始终按既有拓扑/模块
+    主线选择下一个知识点，priority 仅保留为强度元数据，不参与插队排序。
     completed/in-progress 任务的 (day, order) 冻结不动。
     """
     if not has_dependencies(points):
@@ -519,15 +595,8 @@ def reprioritize_pending(
             ready = list(remaining_kps)
 
         def kp_pick_key(kp_id: str) -> tuple:
-            kp_tasks = pending_by_kp[kp_id]
-            has_high = any(str(t.get("priority")) == "high" for t in kp_tasks)
-            point = point_by_id[kp_id]
-            return (
-                0 if has_high else 1,
-                _as_int(point.get("difficulty"), 3),
-                -_as_int(point.get("weight"), 0),
-                kp_order.get(kp_id, 9999),
-            )
+            # 主线顺序优先：失分/高优先级只应增加强度，不应让知识点插队。
+            return (kp_order.get(kp_id, 9999),)
 
         chosen = min(ready, key=kp_pick_key)
         remaining_kps.remove(chosen)

@@ -5,6 +5,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type MutableRefObject,
   type ReactNode,
 } from 'react'
 
@@ -13,6 +14,19 @@ export type CourseTimerState = {
   courseName: string
   elapsedSec: number
   running: boolean
+}
+
+type TimerSession = CourseTimerState & {
+  id: string
+  accumulatedMs: number
+  startedAt: number | null
+}
+
+type PendingRecord = {
+  id: string
+  courseId: string
+  courseName: string
+  minutes: number
 }
 
 type CourseTimerContextValue = {
@@ -26,88 +40,205 @@ type CourseTimerContextValue = {
 }
 
 const CourseTimerContext = createContext<CourseTimerContextValue | null>(null)
+const MAX_RECORD_MINUTES = 1440
 
-/**
- * 课程级计时器：状态挂在 App 顶层 Provider，组件树任意子树卸载（如离开「计划」页）
- * 都不会丢失计时。只有用户手动暂停/停止才改变 running 状态。
- */
+function createSession(courseId: string, courseName: string): TimerSession {
+  return {
+    id: `timer-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    courseId,
+    courseName,
+    elapsedSec: 0,
+    accumulatedMs: 0,
+    startedAt: Date.now(),
+    running: true,
+  }
+}
+
+function elapsedMs(session: TimerSession, now = Date.now()): number {
+  return session.accumulatedMs + (session.running && session.startedAt ? Math.max(0, now - session.startedAt) : 0)
+}
+
+function publicTimer(session: TimerSession | null, now = Date.now()): CourseTimerState | null {
+  if (!session) return null
+  return { ...session, elapsedSec: Math.floor(elapsedMs(session, now) / 1000) }
+}
+
+/** 顶栏自动计时；关闭时的未确认提交会使用同一 client id 在下次进入时重试。 */
 export function CourseTimerProvider({
   children,
+  activeCourseId,
+  activeCourseName,
+  userId,
   onRecordMinutes,
+  onFlushMinutes,
+  finalizeRef,
 }: {
   children: ReactNode
-  onRecordMinutes: (courseId: string, courseName: string, minutes: number) => Promise<void>
+  activeCourseId: string
+  activeCourseName: string
+  userId: string
+  onRecordMinutes: (courseId: string, courseName: string, minutes: number, clientEntryId?: string) => Promise<void>
+  onFlushMinutes: (courseId: string, minutes: number, clientEntryId: string) => void
+  finalizeRef?: MutableRefObject<(() => Promise<void>) | null>
 }) {
-  const [timer, setTimer] = useState<CourseTimerState | null>(null)
+  const [session, setSession] = useState<TimerSession | null>(null)
+  const [displayTimer, setDisplayTimer] = useState<CourseTimerState | null>(null)
   const [recording, setRecording] = useState(false)
-  const timerRef = useRef<CourseTimerState | null>(null)
-  timerRef.current = timer
+  const sessionRef = useRef<TimerSession | null>(null)
+  const submittingRef = useRef(new Set<string>())
+  const recordMinutesRef = useRef(onRecordMinutes)
+  const flushMinutesRef = useRef(onFlushMinutes)
+  const storageKey = `final-congee-course-timer-pending:${userId || 'anonymous'}`
 
-  // running 为 true 时每秒 +1；暂停时清理 interval，elapsedSec 保留。
   useEffect(() => {
-    if (!timer?.running) return
-    const id = window.setInterval(() => {
-      setTimer((current) => (current ? { ...current, elapsedSec: current.elapsedSec + 1 } : current))
-    }, 1000)
-    return () => window.clearInterval(id)
-  }, [timer?.running])
+    recordMinutesRef.current = onRecordMinutes
+    flushMinutesRef.current = onFlushMinutes
+  }, [onRecordMinutes, onFlushMinutes])
 
-  const start = useCallback((courseId: string, courseName: string) => {
-    setTimer((current) => {
-      // 同一门课：恢复计时；不同课程：直接覆盖（旧的由调用方先 stopAndRecord）。
-      if (current && current.courseId === courseId) {
-        return { ...current, running: true }
-      }
-      return { courseId, courseName, elapsedSec: 0, running: true }
-    })
+  const replaceSession = useCallback((next: TimerSession | null) => {
+    sessionRef.current = next
+    setSession(next)
+    setDisplayTimer(publicTimer(next))
   }, [])
 
-  const toggle = useCallback(() => {
-    setTimer((current) => (current ? { ...current, running: !current.running } : current))
-  }, [])
-
-  const stopAndRecord = useCallback(async () => {
-    const current = timerRef.current
-    if (!current) return
-    // 舍弃秒数,只计整分钟:3分34秒 记为 3 分钟;不足 1 分钟(如 0分35秒)记为 0,不写入。
-    const minutes = Math.floor(current.elapsedSec / 60)
-    if (minutes <= 0) {
-      // 不足 1 分钟:无有效时长可记,直接清掉计时,不调用后端(后端要求 minutes>=1)。
-      setTimer(null)
-      return
+  const readPending = useCallback((): PendingRecord[] => {
+    try {
+      const parsed = JSON.parse(window.localStorage.getItem(storageKey) || '[]')
+      return Array.isArray(parsed) ? parsed.filter((item): item is PendingRecord =>
+        Boolean(item && typeof item.id === 'string' && typeof item.courseId === 'string' && Number.isInteger(item.minutes) && item.minutes > 0),
+      ) : []
+    } catch {
+      return []
     }
+  }, [storageKey])
+
+  const writePending = useCallback((items: PendingRecord[]) => {
+    try {
+      if (items.length) window.localStorage.setItem(storageKey, JSON.stringify(items))
+      else window.localStorage.removeItem(storageKey)
+    } catch {
+      // 本地存储不可用不应中断学习界面。
+    }
+  }, [storageKey])
+
+  const enqueue = useCallback((record: PendingRecord) => {
+    const pending = readPending()
+    if (!pending.some((item) => item.id === record.id)) writePending([...pending, record])
+  }, [readPending, writePending])
+
+  const removePending = useCallback((id: string) => {
+    writePending(readPending().filter((item) => item.id !== id))
+  }, [readPending, writePending])
+
+  const submitRecord = useCallback(async (record: PendingRecord) => {
+    if (submittingRef.current.has(record.id)) return
+    submittingRef.current.add(record.id)
     setRecording(true)
     try {
-      await onRecordMinutes(current.courseId, current.courseName, minutes)
+      await recordMinutesRef.current(record.courseId, record.courseName, record.minutes, record.id)
+      removePending(record.id)
     } finally {
-      setRecording(false)
-      setTimer(null)
+      submittingRef.current.delete(record.id)
+      setRecording(submittingRef.current.size > 0)
     }
-  }, [onRecordMinutes])
+  }, [removePending])
+
+  const recordSession = useCallback(async (current: TimerSession | null) => {
+    if (!current) return
+    const minutes = Math.min(MAX_RECORD_MINUTES, Math.floor(elapsedMs(current) / 60000))
+    if (minutes <= 0) return
+    const record = { id: current.id, courseId: current.courseId, courseName: current.courseName, minutes }
+    enqueue(record)
+    await submitRecord(record)
+  }, [enqueue, submitRecord])
+
+  useEffect(() => {
+    for (const pending of readPending()) void submitRecord(pending).catch(() => undefined)
+  }, [readPending, submitRecord])
+
+  useEffect(() => {
+    if (!activeCourseId) return
+    const current = sessionRef.current
+    if (current?.courseId === activeCourseId) return
+    if (current) void recordSession(current).catch(() => undefined)
+    replaceSession(createSession(activeCourseId, activeCourseName))
+  }, [activeCourseId, activeCourseName, recordSession, replaceSession])
+
+  useEffect(() => {
+    setDisplayTimer(publicTimer(sessionRef.current))
+    if (!session?.running) return
+    const id = window.setInterval(() => setDisplayTimer(publicTimer(sessionRef.current)), 1000)
+    return () => window.clearInterval(id)
+  }, [session?.id, session?.running])
+
+  const start = useCallback((courseId: string, courseName: string) => {
+    const current = sessionRef.current
+    if (current?.courseId === courseId) {
+      if (!current.running) replaceSession({ ...current, running: true, startedAt: Date.now() })
+      return
+    }
+    if (current) void recordSession(current).catch(() => undefined)
+    replaceSession(createSession(courseId, courseName))
+  }, [recordSession, replaceSession])
+
+  const toggle = useCallback(() => {
+    const current = sessionRef.current
+    if (!current) return
+    if (current.running) replaceSession({ ...current, accumulatedMs: elapsedMs(current), startedAt: null, running: false })
+    else replaceSession({ ...current, startedAt: Date.now(), running: true })
+  }, [replaceSession])
+
+  const stopAndRecord = useCallback(async () => {
+    const current = sessionRef.current
+    if (!current) return
+    replaceSession(createSession(current.courseId, current.courseName))
+    await recordSession(current)
+  }, [recordSession, replaceSession])
 
   const discard = useCallback(() => {
-    setTimer(null)
-  }, [])
+    // 用户点击 × 明确退出计时；只有手动点击“开始计时”或切换课程才重新开始。
+    replaceSession(null)
+  }, [replaceSession])
 
-  const backfill = useCallback(
-    async (minutes: number) => {
-      const current = timerRef.current
+  const backfill = useCallback(async (minutes: number) => {
+    const current = sessionRef.current
+    if (!current) return
+    const safe = Math.max(1, Math.min(MAX_RECORD_MINUTES, Math.round(minutes)))
+    const record = { id: `timer-${Date.now()}-backfill`, courseId: current.courseId, courseName: current.courseName, minutes: safe }
+    enqueue(record)
+    await submitRecord(record)
+  }, [enqueue, submitRecord])
+
+  const finalize = useCallback(async () => {
+    const current = sessionRef.current
+    replaceSession(null)
+    await recordSession(current)
+  }, [recordSession, replaceSession])
+
+  useEffect(() => {
+    if (!finalizeRef) return
+    finalizeRef.current = finalize
+    return () => {
+      if (finalizeRef.current === finalize) finalizeRef.current = null
+    }
+  }, [finalize, finalizeRef])
+
+  useEffect(() => {
+    const handlePageHide = () => {
+      const current = sessionRef.current
       if (!current) return
-      const safe = Math.max(1, Math.min(1440, Math.round(minutes)))
-      setRecording(true)
-      try {
-        await onRecordMinutes(current.courseId, current.courseName, safe)
-      } finally {
-        setRecording(false)
-      }
-    },
-    [onRecordMinutes],
-  )
+      const minutes = Math.min(MAX_RECORD_MINUTES, Math.floor(elapsedMs(current) / 60000))
+      if (minutes <= 0) return
+      const record = { id: current.id, courseId: current.courseId, courseName: current.courseName, minutes }
+      enqueue(record)
+      flushMinutesRef.current(record.courseId, record.minutes, record.id)
+    }
+    window.addEventListener('pagehide', handlePageHide)
+    return () => window.removeEventListener('pagehide', handlePageHide)
+  }, [enqueue])
 
   return (
-    <CourseTimerContext.Provider
-      value={{ timer, recording, start, toggle, stopAndRecord, discard, backfill }}
-    >
+    <CourseTimerContext.Provider value={{ timer: displayTimer, recording, start, toggle, stopAndRecord, discard, backfill }}>
       {children}
     </CourseTimerContext.Provider>
   )

@@ -12,6 +12,8 @@ bcrypt<4.1
 email-validator>=2.0
 PyJWT>=2.8
 cryptography>=42.0
+# FastAPI/Starlette TestClient（当前 starlette 版本需要 httpx2 包）
+httpx2>=0.28
 # 扫描版 PDF / 图片本地 OCR 级联（可选，缺失时自动跳过并提示安装）
 pymupdf>=1.24
-rapidocr-onnxruntime>=1.3,<2.0
+rapidocr>=3.6,<4.0

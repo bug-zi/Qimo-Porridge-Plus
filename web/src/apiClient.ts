@@ -12,6 +12,7 @@ export const listCourses = impl.listCourses
 export const createCourse = impl.createCourse
 export const deleteCourse = impl.deleteCourse
 export const getCourseWorkspace = impl.getCourseWorkspace
+export const reviewCourseReadability = impl.reviewCourseReadability
 export const getCourseMindMap = impl.getCourseMindMap
 export const generateCourseMindMap = impl.generateCourseMindMap
 export const regroupCourseMindMapModules = impl.regroupCourseMindMapModules
@@ -25,15 +26,27 @@ export const saveStrategyDocuments = impl.saveStrategyDocuments
 export const approveStrategyDocuments = impl.approveStrategyDocuments
 export const approveStrategyDocumentsInBackground = impl.approveStrategyDocumentsInBackground
 export const getAgentJob = impl.getAgentJob
+export const cancelAgentJob = impl.cancelAgentJob
 export const saveCoursePrompt = impl.saveCoursePrompt
+export const submitCourseFeedback = impl.submitCourseFeedback
+export const submitGlobalCourseFeedback = impl.submitGlobalCourseFeedback
+export const applyGlobalCourseFeedback = impl.applyGlobalCourseFeedback
+export const getCourseFeedbackRules = impl.getCourseFeedbackRules
+export const refineCourseFeedbackRewrite = impl.refineCourseFeedbackRewrite
+export const applyCourseFeedbackRewrite = impl.applyCourseFeedbackRewrite
 export const getCourseMaterialPreview = impl.getCourseMaterialPreview
 export const getCourseMaterialFileUrl = impl.getCourseMaterialFileUrl
 export const getCourseMaterialConvertedFileUrl = impl.getCourseMaterialConvertedFileUrl
 export const rescanCourseMaterials = impl.rescanCourseMaterials
 export const uploadCourseMaterials = impl.uploadCourseMaterials
+export const updateCourseMaterialRole = impl.updateCourseMaterialRole
 export const deleteCourseMaterial = impl.deleteCourseMaterial
 export const getRuntimeModel = impl.getRuntimeModel
 export const saveRuntimeModel = impl.saveRuntimeModel
+export const getAccountProfile = impl.getAccountProfile
+export const saveAccountProfile = impl.saveAccountProfile
+export const uploadAccountAvatar = impl.uploadAccountAvatar
+export const deleteAccountAvatar = impl.deleteAccountAvatar
 export const getUserProfilePrompt = impl.getUserProfilePrompt
 export const saveUserProfilePrompt = impl.saveUserProfilePrompt
 export const getEmbeddingProfile = impl.getEmbeddingProfile
@@ -43,15 +56,18 @@ export const rebuildKnowledgeEmbeddings = impl.rebuildKnowledgeEmbeddings
 export const getKnowledgeBaseStatus = impl.getKnowledgeBaseStatus
 export const submitCoursePracticeAnswer = impl.submitCoursePracticeAnswer
 export const submitCourseWrongAnswerRetry = impl.submitCourseWrongAnswerRetry
+export const repairCourseMockQuestions = impl.repairCourseMockQuestions
 export const submitCourseMockAnswers = impl.submitCourseMockAnswers
 export const clearCoursePracticeAnswer = impl.clearCoursePracticeAnswer
 export const clearCourseMockResult = impl.clearCourseMockResult
 export const updateCourseWorkspace = impl.updateCourseWorkspace
 export const flushCourseWorkspaceNote = impl.flushCourseWorkspaceNote
 export const recordCourseTimeLog = impl.recordCourseTimeLog
+export const flushCourseTimeLog = impl.flushCourseTimeLog
 export const deleteCourseTimeLog = impl.deleteCourseTimeLog
 export const askCourseAgent = impl.askCourseAgent
 export const streamCourseAgent = impl.streamCourseAgent
+export const streamStrategyRevision = impl.streamStrategyRevision
 export const applyCourseAdjustmentProposal = impl.applyCourseAdjustmentProposal
 export const dismissCourseAdjustmentProposal = impl.dismissCourseAdjustmentProposal
 export const adjustCoursePlan = impl.adjustCoursePlan
@@ -69,6 +85,7 @@ export const dismissCourseExternalSource = impl.dismissCourseExternalSource
 export const deleteCourseWrongAnswer = impl.deleteCourseWrongAnswer
 export const listArchiveItems = impl.listArchiveItems
 export const restoreArchiveItem = impl.restoreArchiveItem
+export const permanentlyDeleteArchiveItem = impl.permanentlyDeleteArchiveItem
 export const toRuntimeModelProfile = impl.toRuntimeModelProfile
 export const getCourseGlossary = impl.getCourseGlossary
 export const getCourseGlossaryStatus = impl.getCourseGlossaryStatus
@@ -80,6 +97,7 @@ export type {
   AgentStreamDone,
   AgentStreamHandlers,
   AgentStreamHandle,
+  StrategyRevisionHandlers,
 } from './api'
 
 /** 演示模式标记：SettingsView 等需要短路真实网络请求的场合使用。 */

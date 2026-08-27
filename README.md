@@ -72,6 +72,16 @@ OpenAI 兼容模型适配层（GPT / DeepSeek / GLM / 自定义）
 
 ## 本地运行
 
+后端（Windows，本仓库已约定使用 `backend/.venv`）：
+
+```bash
+cd backend
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
+```
+
 前端：
 
 ```bash
@@ -80,17 +90,16 @@ npm install
 npm run dev
 ```
 
-后端：
+后端默认监听 `http://127.0.0.1:8000`；前端开发服务器默认监听 `http://127.0.0.1:5173`。如前端部署地址不同，需要同步调整后端 CORS 白名单。
 
-```bash
-cd backend
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
-```
+### 多用户与部署注意事项
 
-后端默认监听 `http://127.0.0.1:8000`；在设置页配置任意 OpenAI 兼容模型服务的 Base URL、模型名与 API Key（仅保存在本机）。
+- `/api/*` 默认需要登录；仅健康检查与注册/登录/刷新端点在白名单中。课程、归档、自画像等数据均按当前用户隔离。
+- 首次启动会在 `backend/.env` 中生成 `EXAM_BOOSTER_JWT_SECRET`；部署时务必持久化该文件或显式配置同名环境变量，否则重启/迁移后已有 token 会全部失效。
+- SQLite 数据库位于 `backend/data/exam_booster.db`，课程文件位于 `backend/data/courses/{course_id}/`。生产/演示环境切换前建议备份或清理测试库。
+- 默认 CORS 仅面向本地开发地址（`127.0.0.1:5173`/`localhost:5173`）；公网部署需改成实际 HTTPS 域名，并通过反向代理终止 TLS。
+- 多进程部署需谨慎：当前 `AgentJobWorker` 按单 FastAPI 进程设计，`uvicorn --workers N` 会启动多份 worker，后续应加分布式锁或拆独立任务进程。
+- 多用户部署不要启用 `VITE_DEMO_MODE=true`；demo 模式会绕过认证，仅用于静态演示。
 
 运行测试：
 
@@ -103,7 +112,7 @@ pytest tests/
 
 ## 隐私与边界
 
-- 默认在 Windows 本机运行，不包含登录、云同步、多人协作和公开部署。
+- 校园版已包含邮箱账号体系与按用户隔离的数据访问控制，但仍默认由部署者自管 SQLite 数据库和本地文件库。
 - 网址资料仅保存链接、备注和用户摘录，不自动抓取网页正文。
 - 外部联网检索默认关闭，仅在用户配置对应 MCP 服务后可用。
 - 模型调用通过用户配置的 GPT、DeepSeek、GLM 或 OpenAI 兼容接口完成；API Key 仅保存在本机 `.env`，不会上传。

@@ -4,13 +4,19 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from ..knowledge_service import (
     get_embedding_status,
     save_embedding_config,
     test_embedding_connection,
+)
+from ..auth_service import (
+    delete_account_avatar,
+    get_account_profile,
+    save_account_avatar,
+    update_account_profile,
 )
 from ..study_service import (
     fetch_available_model_ids,
@@ -45,6 +51,13 @@ class RuntimeModelUpdateRequest(BaseModel):
 
 class UserProfilePromptUpdateRequest(BaseModel):
     content: str = Field(default="", max_length=4000)
+
+
+class AccountProfileUpdateRequest(BaseModel):
+    display_name: str = Field(min_length=1, max_length=40)
+    gender: str = Field(default="", max_length=20)
+    age: int | None = Field(default=None, ge=0, le=150)
+    signature: str = Field(default="", max_length=200)
 
 
 class EmbeddingConfigRequest(BaseModel):
@@ -100,6 +113,76 @@ def update_runtime_model(payload: RuntimeModelUpdateRequest) -> dict[str, str | 
     if not payload.api_key.strip() and not get_runtime_model_api_key():
         raise HTTPException(status_code=422, detail="请先填写 API Key")
     return save_runtime_model_profile(base_url, payload.api_key, payload.model)
+
+
+@router.get("/api/account-profile")
+def account_profile(owner_id: str = Depends(current_owner_id)) -> dict[str, Any]:
+    profile = get_account_profile(owner_id)
+    if profile is None:
+        raise HTTPException(status_code=401, detail="用户不存在")
+    return profile
+
+
+@router.put("/api/account-profile")
+def update_account_profile_route(
+    payload: AccountProfileUpdateRequest,
+    owner_id: str = Depends(current_owner_id),
+) -> dict[str, Any]:
+    try:
+        profile = update_account_profile(
+            owner_id,
+            display_name=payload.display_name,
+            gender=payload.gender,
+            age=payload.age,
+            signature=payload.signature,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    if profile is None:
+        raise HTTPException(status_code=401, detail="用户不存在")
+    return profile
+
+
+AVATAR_MAX_BYTES = 2 * 1024 * 1024
+AVATAR_MIME_SIGNATURES = {
+    "image/jpeg": (b"\xff\xd8\xff",),
+    "image/png": (b"\x89PNG\r\n\x1a\n",),
+    "image/gif": (b"GIF87a", b"GIF89a"),
+    "image/webp": (b"RIFF",),
+}
+
+
+@router.post("/api/account-profile/avatar")
+async def upload_account_avatar(
+    avatar: UploadFile = File(...),
+    owner_id: str = Depends(current_owner_id),
+) -> dict[str, Any]:
+    mime_type = (avatar.content_type or "").lower()
+    signatures = AVATAR_MIME_SIGNATURES.get(mime_type)
+    if signatures is None:
+        raise HTTPException(status_code=422, detail="仅支持 JPG、PNG、GIF 或 WebP 图片")
+    image_data = await avatar.read(AVATAR_MAX_BYTES + 1)
+    await avatar.close()
+    if not image_data:
+        raise HTTPException(status_code=422, detail="请选择非空图片文件")
+    if len(image_data) > AVATAR_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="头像图片不能超过 2 MB")
+    if not any(image_data.startswith(signature) for signature in signatures):
+        raise HTTPException(status_code=422, detail="图片文件内容与格式不符")
+    if mime_type == "image/webp" and (len(image_data) < 12 or image_data[8:12] != b"WEBP"):
+        raise HTTPException(status_code=422, detail="图片文件内容与格式不符")
+    profile = save_account_avatar(owner_id, image_data, mime_type)
+    if profile is None:
+        raise HTTPException(status_code=401, detail="用户不存在")
+    return profile
+
+
+@router.delete("/api/account-profile/avatar")
+def remove_account_avatar(owner_id: str = Depends(current_owner_id)) -> dict[str, Any]:
+    profile = delete_account_avatar(owner_id)
+    if profile is None:
+        raise HTTPException(status_code=401, detail="用户不存在")
+    return profile
 
 
 @router.get("/api/user-profile")

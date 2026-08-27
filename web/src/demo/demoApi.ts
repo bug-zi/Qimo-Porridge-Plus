@@ -10,6 +10,7 @@
  *   done 的 workspace 中追加本轮 user/assistant 消息（对齐 study_service.py 行为）。
  */
 import type {
+  AccountProfile,
   AdjustmentProposal,
   AgentJob,
   ArchiveItem,
@@ -30,6 +31,7 @@ import type {
   PracticeAnswerResult,
   SearchResult,
   StrategyDocuments,
+  StrategyRevisionMessage,
   StudyMessage,
   StudyWorkspace,
   TimeLogEntry,
@@ -99,6 +101,7 @@ type DemoSnapshot = {
   archive: ArchiveItemApiResponse[]
   runtimeModel: RuntimeModel
   userProfile: UserProfilePrompt
+  accountProfile?: AccountProfile
   embeddingProfile: EmbeddingProfile
   mcpServers: McpServer[]
 }
@@ -292,6 +295,30 @@ function daysUntil(examDate: string): number {
 function replaceWorkspace(courseId: string, workspace: StudyWorkspace): StudyWorkspace {
   requireSnapshot().workspaces[courseId] = JSON.parse(JSON.stringify(workspace)) as StudyWorkspace
   return decoratedWorkspace(courseId)
+}
+
+function replaceFirstText(node: unknown, originalText: string, rewrittenText: string): boolean {
+  if (Array.isArray(node)) {
+    for (let index = 0; index < node.length; index += 1) {
+      const value = node[index]
+      if (typeof value === 'string' && value.includes(originalText)) {
+        node[index] = value.replace(originalText, rewrittenText)
+        return true
+      }
+      if (value && typeof value === 'object' && replaceFirstText(value, originalText, rewrittenText)) return true
+    }
+    return false
+  }
+  if (node && typeof node === 'object') {
+    for (const [key, value] of Object.entries(node)) {
+      if (typeof value === 'string' && value.includes(originalText)) {
+        ;(node as Record<string, unknown>)[key] = value.replace(originalText, rewrittenText)
+        return true
+      }
+      if (value && typeof value === 'object' && replaceFirstText(value, originalText, rewrittenText)) return true
+    }
+  }
+  return false
 }
 
 function recomputeCourseProgress(workspace: StudyWorkspace): number {
@@ -533,6 +560,19 @@ const demoApi: ApiSurface = {
     return replaceWorkspace(courseId, workspace)
   },
 
+  async reviewCourseReadability(courseId) {
+    await delay(450)
+    await loadSnapshot()
+    const workspace = decoratedWorkspace(courseId)
+    const ready = workspace.tasks.filter((task) => task.kind !== 'orientation' && task.studyGuide)
+    const pending = workspace.tasks.filter((task) => task.kind !== 'orientation' && !task.studyGuide).length
+    for (const task of ready) {
+      if (task.studyGuide) task.studyGuide.readabilityReview = { version: 1, status: 'passed', score: 94, issues: [], summary: '排版清晰，可直接阅读', taskId: task.id }
+    }
+    workspace.readabilityReview = { version: 1, status: pending ? 'attention' : 'passed', score: ready.length ? 94 : 0, reviewedAt: nowIso(), reviewedLessonCount: ready.length, passedLessonCount: ready.length, attentionLessonCount: 0, pendingLessonCount: pending, summary: pending ? `0 课需要关注，${pending} 课待生成` : '全部课程排版清晰', lessons: ready.map((task) => ({ taskId: task.id, status: 'passed' as const, score: 94, issueCount: 0 })) }
+    return replaceWorkspace(courseId, workspace)
+  },
+
   async submitCourseDiagnostic(courseId, answers) {
     await delay(800)
     await loadSnapshot()
@@ -597,6 +637,11 @@ const demoApi: ApiSurface = {
 
   async getAgentJob(jobId) {
     return getJob(jobId)
+  },
+
+  async cancelAgentJob(jobId) {
+    const job = getJob(jobId)
+    return { ...job, status: 'cancelled' as const, updatedAt: nowIso() }
   },
 
   /* ---------------- 术语词条 ---------------- */
@@ -675,7 +720,7 @@ const demoApi: ApiSurface = {
     return decoratedWorkspace(courseId)
   },
 
-  async uploadCourseMaterials(courseId, files) {
+  async uploadCourseMaterials(courseId, files, role = 'supplementary') {
     await delay(900)
     const fileArray = Array.from(files)
     await loadSnapshot()
@@ -687,11 +732,25 @@ const demoApi: ApiSurface = {
         type: (file.name.split('.').pop() ?? 'FILE').toUpperCase(),
         size: file.size,
         detail: `${file.type || 'application/octet-stream'} · ${(file.size / 1024).toFixed(1)} KB · 演示模式占位`,
+        role: role === 'primary' ? 'primary' : 'supplementary',
+        isPrimary: role === 'primary',
+        priorityOrder: workspace.materials.length + 1,
         previewStatus: 'unsupported',
         previewLabel: '演示模式',
         previewMessage: '演示站不保存上传的文件，仅展示导入流程。',
       })
     }
+    return replaceWorkspace(courseId, workspace)
+  },
+
+  async updateCourseMaterialRole(courseId, relativePath, payload) {
+    await loadSnapshot()
+    const workspace = decoratedWorkspace(courseId)
+    workspace.materials = workspace.materials.map((material) => {
+      if (material.relativePath !== relativePath) return material
+      const role = payload.role === 'primary' ? 'primary' : 'supplementary'
+      return { ...material, role, isPrimary: role === 'primary', priorityOrder: payload.priorityOrder ?? material.priorityOrder ?? 0 }
+    })
     return replaceWorkspace(courseId, workspace)
   },
 
@@ -715,6 +774,48 @@ const demoApi: ApiSurface = {
     return data.runtimeModel
   },
 
+  async getAccountProfile() {
+    const data = await loadSnapshot()
+    data.accountProfile ??= {
+      id: 'demo',
+      email: 'demo@example.com',
+      displayName: '演示用户',
+      role: 'user',
+      avatarUrl: '',
+      gender: '',
+      age: null,
+      signature: '',
+    }
+    return data.accountProfile
+  },
+
+  async saveAccountProfile(payload) {
+    const data = await loadSnapshot()
+    const current = await demoApi.getAccountProfile()
+    data.accountProfile = { ...current, ...payload }
+    return data.accountProfile
+  },
+
+  async uploadAccountAvatar(file: File) {
+    const data = await loadSnapshot()
+    const current = await demoApi.getAccountProfile()
+    const avatarUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(String(reader.result ?? ''))
+      reader.onerror = () => reject(new Error('头像读取失败'))
+      reader.readAsDataURL(file)
+    })
+    data.accountProfile = { ...current, avatarUrl }
+    return data.accountProfile
+  },
+
+  async deleteAccountAvatar() {
+    const data = await loadSnapshot()
+    const current = await demoApi.getAccountProfile()
+    data.accountProfile = { ...current, avatarUrl: '' }
+    return data.accountProfile
+  },
+
   async getUserProfilePrompt() {
     const data = await loadSnapshot()
     return data.userProfile
@@ -724,6 +825,81 @@ const demoApi: ApiSurface = {
     const data = await loadSnapshot()
     data.userProfile = { content, updatedAt: nowIso() }
     return data.userProfile
+  },
+  async submitCourseFeedback(_courseId, payload) {
+    await delay(250)
+    const feedbackId = `demo-feedback-${Date.now()}`
+    return {
+      feedbackId,
+      status: 'analyzed',
+      message: '演示模式：课程意见已记录，并已生成当前片段优化建议。',
+      rewriteProposal: {
+        feedbackId,
+        originalText: payload.selectedText,
+        rewrittenText: payload.selectedText + '\n\n（演示改写：这里会根据你的意见重新组织表达。）',
+        rationale: '演示模式下返回示例改写。',
+        safetyNotes: [],
+        replaceable: Boolean(payload.context?.field),
+        target: payload.context ?? {},
+        createdAt: nowIso(),
+      },
+    }
+  },
+
+  async submitGlobalCourseFeedback(courseId, taskId, sectionId, sectionIndex, userComment) {
+    await delay(300)
+    await loadSnapshot()
+    const task = decoratedWorkspace(courseId).tasks.find((item) => item.id === taskId)
+    if (!task?.studyGuide) throw new Error('当前任务没有可修改的讲义内容')
+    const feedbackId = `demo-global-feedback-${Date.now()}`
+    const revisedSection = JSON.parse(JSON.stringify(task.studyGuide.sections?.[sectionIndex] ?? { id: sectionId, label: `第 ${sectionIndex + 1} 小节`, title: '当前小节' }))
+    return {
+      feedbackId, status: 'analyzed', message: '演示模式：小节意见已记录，并已生成当前小节修改预览。',
+      proposal: {
+        feedbackId, taskId, taskTitle: task.title, sectionId, sectionIndex, sectionLabel: revisedSection.label ?? `第 ${sectionIndex + 1} 小节`, changeSummary: `已按要求修改当前小节：${userComment}`,
+        rationale: '演示小节修改流程。', revisedSection, baseRevision: 'demo', createdAt: nowIso(),
+      },
+    }
+  },
+
+  async applyGlobalCourseFeedback(courseId, feedbackId) {
+    await delay(220)
+    await loadSnapshot()
+    return { feedbackId, message: '演示模式：已应用当前小节修改。', workspace: replaceWorkspace(courseId, decoratedWorkspace(courseId)) }
+  },
+
+  async refineCourseFeedbackRewrite(_courseId, feedbackId, extraComment, previousRewrite) {
+    await delay(250)
+    return {
+      feedbackId,
+      rewriteProposal: {
+        feedbackId,
+        originalText: '',
+        rewrittenText: previousRewrite + '\n\n（演示继续修改：' + extraComment + '）',
+        rationale: '演示模式下根据补充意见继续修改。',
+        safetyNotes: [],
+        replaceable: true,
+        target: {},
+        createdAt: nowIso(),
+      },
+    }
+  },
+
+  async applyCourseFeedbackRewrite(courseId, feedbackId, originalText, rewrittenText, target) {
+    await delay(250)
+    await loadSnapshot()
+    const workspace = decoratedWorkspace(courseId)
+    const task = workspace.tasks.find((item) => item.id === target?.taskId)
+    if (!task?.studyGuide || !replaceFirstText(task.studyGuide, originalText, rewrittenText)) {
+      throw new Error('当前内容已经变化，找不到原始选中文本，请重新选择')
+    }
+    ;(task as PlanTask & { contentUpdatedAt?: string }).contentUpdatedAt = nowIso()
+    return { feedbackId, message: '演示模式：已确认替换。', workspace: replaceWorkspace(courseId, workspace) }
+  },
+
+  async getCourseFeedbackRules(_courseId) {
+    await delay(120)
+    return { version: 1, rules: [], summaryPrompt: '', updatedAt: '' }
   },
 
   async getEmbeddingProfile() {
@@ -827,6 +1003,12 @@ const demoApi: ApiSurface = {
     return result as PracticeAnswerResult
   },
 
+  async repairCourseMockQuestions(courseId) {
+    await loadSnapshot()
+    const workspace = decoratedWorkspace(courseId)
+    return { workspace, repaired: false, source: 'existing' as const, warning: '', questionCount: workspace.mockQuestions.length }
+  },
+
   async submitCourseMockAnswers(courseId, answers) {
     await delay(1200)
     await loadSnapshot()
@@ -913,8 +1095,12 @@ const demoApi: ApiSurface = {
   async recordCourseTimeLog(courseId, payload) {
     await loadSnapshot()
     const workspace = decoratedWorkspace(courseId)
+    const existing = payload.clientEntryId
+      ? (workspace.timeLog ?? []).find((item) => item.id === payload.clientEntryId)
+      : undefined
+    if (existing) return { entry: existing, dailyProgress: workspace.dailyProgress! }
     const entry: TimeLogEntry = {
-      id: `log-${Date.now()}`,
+      id: payload.clientEntryId || `log-${Date.now()}`,
       taskId: payload.taskId ?? '',
       date: payload.date ?? toIsoDate(new Date()),
       minutes: payload.minutes,
@@ -924,6 +1110,10 @@ const demoApi: ApiSurface = {
     workspace.timeLog = [...(workspace.timeLog ?? []), entry]
     const updated = replaceWorkspace(courseId, workspace)
     return { entry, dailyProgress: updated.dailyProgress! }
+  },
+
+  flushCourseTimeLog(): void {
+    // 演示模式只保存在当前页面内存；关闭页面无需网络兜底。
   },
 
   async deleteCourseTimeLog(courseId, entryId) {
@@ -1021,6 +1211,50 @@ const demoApi: ApiSurface = {
       }, elapsed)
     })()
 
+    return {
+      cancel: () => {
+        cancelled = true
+        for (const timer of timers) window.clearTimeout(timer)
+      },
+    }
+  },
+
+  /* ---------------- 策略草稿对话修订（演示版） ---------------- */
+
+  streamStrategyRevision(
+    _courseId: string,
+    payload: { message: string; history: StrategyRevisionMessage[]; reviewPlan: string; coursePrompt: string },
+    handlers: localApi.StrategyRevisionHandlers,
+  ): localApi.AgentStreamHandle {
+    let cancelled = false
+    const timers: number[] = []
+    const schedule = (fn: () => void, ms: number) => {
+      const timer = window.setTimeout(() => {
+        if (!cancelled) fn()
+      }, ms)
+      timers.push(timer)
+    }
+    void (async () => {
+      await delay(200)
+      if (cancelled) return
+      // 演示变换：识别"减负/太满"类诉求 → 复习计划末尾追加调整说明行；其余诉求在课程 Prompt 追加一条用户要求
+      const wantsLighter = /减负|太满|太多|压缩|减少/.test(payload.message)
+      const reply = wantsLighter
+        ? '已把第 3 天的学习块从 5 个压缩到 3 个，腾出的 40 分钟挪给错题复盘；其余天次保持不变，两份草稿都已更新，可在左侧预览确认。'
+        : `已按「${payload.message.slice(0, 24)}」调整两份草稿：复习计划的相应天次加重了对应知识点，课程总 Prompt 也补充了这条偏好。请在左侧预览确认。`
+      const reviewPlan = wantsLighter
+        ? payload.reviewPlan.replace('#### 当日时间表', '#### 当日时间表（已减负：合并 2 个学习块，腾出 40 分钟错题复盘）')
+        : `${payload.reviewPlan.trimEnd()}\n\n> 演示修订：${payload.message.slice(0, 40)}\n`
+      const coursePrompt = `${payload.coursePrompt.trimEnd()}\n- 演示修订：${payload.message.slice(0, 40)}\n`
+      const chunks = reply.match(/[\s\S]{1,3}/g) ?? [reply]
+      let elapsed = 300
+      for (const chunk of chunks) {
+        elapsed += 18 + Math.random() * 30
+        schedule(() => handlers.onToken(chunk), elapsed)
+      }
+      elapsed += 200
+      schedule(() => handlers.onDone({ reply, reviewPlan, coursePrompt }), elapsed)
+    })()
     return {
       cancel: () => {
         cancelled = true
@@ -1220,6 +1454,14 @@ const demoApi: ApiSurface = {
   async listArchiveItems() {
     const data = await loadSnapshot()
     return data.archive.map(toArchiveItem)
+  },
+
+  async permanentlyDeleteArchiveItem(archiveId) {
+    const data = await loadSnapshot()
+    const index = data.archive.findIndex((item) => item.id === archiveId)
+    if (index === -1) throw new Error('归档内容不存在')
+    data.archive.splice(index, 1)
+    return { deleted: true, archiveItems: data.archive.map(toArchiveItem) }
   },
 
   async restoreArchiveItem(archiveId) {

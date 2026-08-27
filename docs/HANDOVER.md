@@ -36,7 +36,9 @@
 
 ## 三、当前状态
 
-- 工作区**干净**，所有已做工作均已提交（`f24950c` 为最新）
+- 阶段2-4 收尾已推进：新增 `backend/tests/test_multi_tenant_isolation.py` 覆盖课程列表/课程级路由/归档/自画像 owner 隔离；README 已补多用户部署注意事项
+- 后端测试：`backend/.venv/Scripts/python.exe -m pytest tests -q` → 44 passed, 3 skipped
+- 前端类型检查：`npx tsc -b` → 通过；`vite build` 仍在 2239 modules transformed 后原生退出 exit 1（无 JS/TS 报错，符合此前 rolldown 原生崩溃类问题；已重试 2 次）
 - 后端语法全过（ast 28 文件）、启动实测通过、双用户隔离冒烟全过
 - **注意**：`backend/app/routers/__init__.py` 文件头有个 UTF-8 BOM（历史遗留，Python 能正常 import，验证语法时需跳过或用 `utf-8-sig` 读）
 - **测试数据**：`backend/data/exam_booster.db` 里有多个测试注册用户（test@example.com、alice*/bob*/prof-a*/prof-b*@example.com 等），生产部署前应清库或换库
@@ -56,11 +58,11 @@ $ha = @{Authorization="Bearer $($a.access_token)"}
 
 ## 五、下一步工作（按优先级）
 
-### 1. 阶段2-4：多用户隔离终验 + 收尾（任务列表 #4，未开始）
-- 前端联调：两个浏览器身份（或隐身窗口）分别登录，验证课程列表互不可见
-- 前端 `tsc -b` + `npx vite build` 回归（上次 build 遇到过 rolldown 原生崩溃 exit 9，**重试即可**，不是代码问题）
-- 补齐/更新 README 的部署说明
-- 可选：给 `backend/tests/` 补多租户 pytest 用例
+### 1. 阶段2-4：多用户隔离终验 + 收尾（任务列表 #4，进行中）
+- 已完成：README 部署说明补齐；`backend/tests/test_multi_tenant_isolation.py` 新增 3 个多租户隔离 pytest（课程、归档、自画像）
+- 已完成：后端全量 pytest 回归 44 passed, 3 skipped；前端 `npx tsc -b` 通过
+- 待人工/浏览器终验：两个浏览器身份（或隐身窗口）分别登录，验证课程列表互不可见
+- 待处理/确认：`npx vite build` 在 rolldown/Vite 原生构建阶段 exit 1，无 TypeScript 错误；若继续失败，可考虑临时锁 Vite/Rolldown 版本或切换构建后端
 
 ### 2. 已知遗留问题
 - `web/src/demo/demoApi.ts`（demo 模式）没有 auth 概念，`VITE_DEMO_MODE=true` 时完全绕过登录——多用户部署环境**不要开** demo 模式，或后续给 demo 加独立入口

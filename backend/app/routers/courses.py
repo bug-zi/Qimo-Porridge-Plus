@@ -4,6 +4,8 @@ import json
 import sqlite3
 from datetime import datetime, timedelta
 from typing import Any, Literal
+
+from ..course_style_templates import CourseContentStyle, DEFAULT_COURSE_CONTENT_STYLE
 from urllib.error import HTTPError, URLError
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -25,6 +27,7 @@ from ..study_service import (
     mark_strategy_maintenance_pending,
     regroup_course_modules,
     replan_review_mainline,
+    review_course_readability,
     save_course_setup,
     save_mind_map,
     save_workspace,
@@ -40,11 +43,23 @@ from .deps import (
     current_owner_id,
     get_connection,
     list_active_archive_items,
+    permanently_delete_archive_item,
     purge_expired_archive_items,
     require_course_ownership,
 )
 
 router = APIRouter()
+
+
+@router.post("/api/courses/{course_id}/readability-review")
+def audit_course_readability(
+    course_id: str,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
+    try:
+        return review_course_readability(course_id)
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 class CourseCreate(BaseModel):
@@ -76,9 +91,10 @@ class CourseSetupRequest(BaseModel):
     target_text: str = Field(default="", max_length=200)
     daily_hours: float = Field(gt=0, le=12)
     days: int = Field(ge=1, le=30)
-    review_count: int = Field(default=0, ge=0, le=30)
+    review_count: int = Field(default=0, ge=0)
     exam_format: str = Field(default="", max_length=1000)
     remarks: str = Field(default="", max_length=2000)
+    content_style: CourseContentStyle = DEFAULT_COURSE_CONTENT_STYLE
 
 
 class PlanParamsAdjustRequest(BaseModel):
@@ -628,6 +644,19 @@ def list_archive(owner_id: str = Depends(current_owner_id)) -> list[ArchiveItemR
     """当前用户的归档列表（fa730d1 误删后恢复，阶段2 起带 owner 过滤）。"""
     with get_connection() as connection:
         return list_active_archive_items(connection, owner_id)
+
+
+@router.delete("/api/archive/{archive_id}")
+def delete_archive_item(archive_id: str, owner_id: str = Depends(current_owner_id)) -> dict[str, Any]:
+    """立即永久删除自己的归档项；课程项同时清理 data 下的全部课程数据。"""
+    with get_connection() as connection:
+        purge_expired_archive_items(connection)
+        if not permanently_delete_archive_item(connection, archive_id, owner_id):
+            raise HTTPException(status_code=404, detail="归档内容不存在或已超过 7 天")
+        return {
+            "deleted": True,
+            "archive_items": [item.model_dump() for item in list_active_archive_items(connection, owner_id)],
+        }
 
 
 @router.post("/api/archive/{archive_id}/restore")

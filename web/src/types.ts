@@ -3,6 +3,7 @@ export type LearningModule =
   | 'materials'
   | 'planning'
   | 'mindmap'
+  | 'glossary'
   | 'plan'
   | 'practice'
   | 'mock'
@@ -52,6 +53,118 @@ export type ModelProfile = {
 export type UserProfilePrompt = {
   content: string
   updatedAt: string
+}
+
+export type CourseFeedbackSelectionFragment = {
+  selectedText: string
+  field: string
+  examPointId?: string
+  exampleId?: string
+  conceptTitle?: string
+  itemIndex?: string
+  sectionKind?: string
+}
+
+export type CourseFeedbackContext = {
+  beforeText?: string
+  afterText?: string
+  sectionText?: string
+  route?: string
+  taskId?: string
+  taskTitle?: string
+  moduleId?: string
+  knowledgePointId?: string
+  sourceArea?: string
+  selectionFragments?: CourseFeedbackSelectionFragment[]
+  [key: string]: string | number | boolean | null | undefined | CourseFeedbackSelectionFragment[]
+}
+
+export type CourseFeedbackRequest = {
+  selectedText: string
+  userComment: string
+  context?: CourseFeedbackContext
+}
+
+export type CourseFeedbackRewriteProposal = {
+  feedbackId: string
+  originalText: string
+  rewrittenText: string
+  rationale: string
+  safetyNotes?: string[]
+  replaceable: boolean
+  target: CourseFeedbackContext
+  createdAt?: string
+}
+
+export type CourseFeedbackSubmitResult = {
+  feedbackId: string
+  status: 'pending_analysis' | 'analyzed' | 'accepted' | string
+  message: string
+  rewriteProposal?: CourseFeedbackRewriteProposal
+  rewriteError?: string
+}
+
+export type CourseFeedbackRefineResult = {
+  feedbackId: string
+  rewriteProposal: CourseFeedbackRewriteProposal
+}
+
+export type CourseFeedbackApplyResult = {
+  feedbackId: string
+  message: string
+  workspace: StudyWorkspace
+}
+
+export type GlobalCourseFeedbackProposal = {
+  feedbackId: string
+  taskId: string
+  taskTitle: string
+  sectionId: string
+  sectionIndex: number
+  sectionLabel: string
+  changeSummary: string
+  rationale: string
+  revisedSection: StudyGuideSection
+  baseRevision: string
+  createdAt: string
+}
+
+export type GlobalCourseFeedbackResult = {
+  feedbackId: string
+  status: string
+  message: string
+  proposal: GlobalCourseFeedbackProposal
+}
+
+export type CourseFeedbackRule = {
+  id: string
+  status: string
+  type: string
+  title: string
+  description: string
+  badPattern?: string
+  preferredPattern?: string
+  sourceFeedbackIds?: string[]
+  weight?: number
+  updatedAt?: string
+}
+
+export type CourseFeedbackRules = {
+  version: number
+  rules: CourseFeedbackRule[]
+  summaryPrompt: string
+  updatedAt: string
+}
+
+export type AccountProfile = {
+  id: string
+  email: string
+  displayName: string
+  role: string
+  avatarUrl: string
+  gender: string
+  age: number | null
+  signature: string
 }
 
 export type Course = {
@@ -104,12 +217,48 @@ export type StudyWorkedExample = {
   conclusion?: string
   checks?: string[]
   examPointIds?: string[]
+  independentVariant?: boolean
+}
+
+export type StoryConceptMapping = {
+  storyElement: string
+  concept: string
+  explanation: string
+}
+
+export type StoryContext = {
+  characters: string[]
+  setting: string
+  mainEvent: string
+  incomingQuestion: string
+  outgoingQuestion: string
+  conceptMappings: StoryConceptMapping[]
+}
+
+export type StoryTerm = { term: string; meaning: string; storyMapping: string; role?: string }
+
+export type StoryExplanationBeat = {
+  heading: string
+  body: string
+  conclusion: string
+  pitfall?: string
 }
 
 export type StudyGuideSection = {
-  id: 'exam-focus' | 'method' | 'worked-example' | 'self-check' | string
+  id?: 'exam-focus' | 'method' | 'worked-example' | 'self-check' | string
+  kind?: 'preparation' | 'explanation' | 'examples' | 'self-check' | string
   label: string
   title: string
+  narrative?: string
+  questions?: string[]
+  terms?: StoryTerm[]
+  conclusions?: string[]
+  pitfalls?: string[]
+  explanationBeats?: StoryExplanationBeat[]
+  methodSummary?: string[]
+  transitionToExamples?: string
+  transitionToSelfCheck?: string
+  storyEventRef?: string
   objectives?: string[]
   sourceHighlights?: string[]
   concepts?: StudyConcept[]
@@ -150,6 +299,35 @@ export type OrientationGuide = {
   checklist: string[]
 }
 
+export type ReadabilityIssue = {
+  code: string
+  severity: 'info' | 'warning' | 'error'
+  message: string
+  field: string
+}
+
+export type LessonReadabilityReview = {
+  version: number
+  status: 'passed' | 'attention' | 'unavailable'
+  score: number
+  issues: ReadabilityIssue[]
+  summary: string
+  taskId?: string
+}
+
+export type CourseReadabilityReview = {
+  version: number
+  status: 'passed' | 'attention' | 'pending'
+  score: number
+  reviewedAt: string
+  reviewedLessonCount: number
+  passedLessonCount: number
+  attentionLessonCount: number
+  pendingLessonCount: number
+  summary: string
+  lessons: Array<{ taskId: string; status: 'passed' | 'attention'; score: number; issueCount: number }>
+}
+
 export type StudyGuide = {
   planningReason?: string
   examPoints?: StudyExamPoint[]
@@ -166,7 +344,9 @@ export type StudyGuide = {
   }
   checklist?: string[]
   sections?: StudyGuideSection[]
+  storyContext?: StoryContext
   orientation?: OrientationGuide
+  readabilityReview?: LessonReadabilityReview
 }
 
 export type EmbeddingProfile = {
@@ -246,6 +426,8 @@ export type PlanTask = {
   knowledgePointId?: string
   status: 'pending' | 'in-progress' | 'completed'
   priority: 'high' | 'medium' | 'low'
+  /** 用户明确点击“学会了”的学习分页索引；缺省时兼容旧进度数据。 */
+  learnedPageIndexes?: number[]
   studyGuide?: StudyGuide
   contentQualityWarning?: string
   schedulingReason?: string
@@ -329,6 +511,9 @@ export type Material = {
   type: string
   size: number
   detail: string
+  role?: 'primary' | 'supplementary'
+  isPrimary?: boolean
+  priorityOrder?: number
   analysisVersion?: number
   parser?: string
   parsedCharacters?: number
@@ -368,10 +553,28 @@ export type MaterialMemory = {
   aiPartialCount: number
   aiSkippedCount: number
   aiUnreadableCount: number
+  primaryCount?: number
+  supplementaryCount?: number
+  primaryMaterials?: string[]
   lastChange: string
   lastSyncedAt: string
   contentRefreshRecommended: boolean
   summary: string
+}
+
+export type CourseContentStyle = 'standard' | 'dialogue' | 'story'
+
+export type CourseContentGenerationMode = 'incremental' | 'all'
+
+export type StrategyGenerationRequest = {
+  reviewPlan: string
+  coursePrompt: string
+  reviewPlanVersion: number
+  coursePromptVersion: number
+  repairOnly?: boolean
+  generationMode?: CourseContentGenerationMode
+  lessonLimit?: number | null
+  continueGeneration?: boolean
 }
 
 export type CourseOnboarding = {
@@ -385,6 +588,7 @@ export type CourseOnboarding = {
   reviewCount?: number
   examFormat: string
   remarks: string
+  contentStyle?: CourseContentStyle
   diagnosticScore?: number
   diagnosticTotal?: number
   diagnosticPercent?: number
@@ -406,11 +610,23 @@ export type StrategyDocuments = {
   maintenanceError?: string
 }
 
+export type StrategyRevisionMessage = {
+  role: 'user' | 'assistant'
+  content: string
+  revision?: { reviewPlan: string; coursePrompt: string }
+}
+
+export type StrategyRevisionStreamDone = {
+  reply: string
+  reviewPlan: string
+  coursePrompt: string
+}
+
 export type AgentJob = {
   id: string
   courseId: string
   jobType: string
-  status: 'queued' | 'running' | 'completed' | 'failed'
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   attempts: number
   maxAttempts: number
   error: string
@@ -540,6 +756,7 @@ export type StudyWorkspace = {
   dailyProgress?: DailyProgress
   pendingProposals?: AdjustmentProposal[]
   schedulingWarnings?: string[]
+  readabilityReview?: CourseReadabilityReview
 }
 
 export type PracticeAnswerResult = {
@@ -641,6 +858,11 @@ export type GlossaryStatus = {
   status: 'idle' | 'generating' | 'ready' | 'failed'
   termsTotal: number
   termsActive: number
+  candidatesTotal: number
+  termsCompleted: number
+  phase: 'idle' | 'scanning' | 'composing' | 'finalizing' | 'ready' | 'failed'
+  startedAt: string
+  progressUpdatedAt: string
   lastError: string
   lastRefreshedAt: string
 }

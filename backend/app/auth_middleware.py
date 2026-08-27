@@ -36,7 +36,10 @@ def is_path_whitelisted(path: str) -> bool:
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         path = request.url.path
-        if not path.startswith("/api/") or is_path_whitelisted(path):
+        # Browser CORS preflight never carries the Bearer token. Let CORSMiddleware answer OPTIONS;
+        # authenticating it produces a bare 401 without CORS headers, surfaced by fetch as the
+        # misleading network error “Failed to fetch”. The actual POST/GET remains authenticated.
+        if request.method == "OPTIONS" or not path.startswith("/api/") or is_path_whitelisted(path):
             return await call_next(request)
 
         auth_header = request.headers.get("Authorization", "")

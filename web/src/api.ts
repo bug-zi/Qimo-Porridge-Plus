@@ -1,11 +1,18 @@
 import { authFetch } from './auth'
 import type {
+  AccountProfile,
   AdjustmentProposal,
   AgentJob,
   ArchiveItem,
   BilibiliCredentialStatus,
   BilibiliCredentialVerifyResult,
   Course,
+  CourseFeedbackApplyResult,
+  CourseFeedbackRefineResult,
+  CourseFeedbackRequest,
+  CourseFeedbackRules,
+  CourseFeedbackSubmitResult,
+  GlobalCourseFeedbackResult,
   CourseMindMap,
   DailyProgress,
   EmbeddingProfile,
@@ -25,6 +32,9 @@ import type {
   PracticeAnswerResult,
   SearchResult,
   StrategyDocuments,
+  StrategyGenerationRequest,
+  StrategyRevisionMessage,
+  StrategyRevisionStreamDone,
   StudyWorkspace,
   TimeLogEntry,
   UserProfilePrompt,
@@ -191,6 +201,10 @@ export function getCourseWorkspace(courseId: string) {
   return request<StudyWorkspace>(`/courses/${encodeURIComponent(courseId)}/workspace`)
 }
 
+export function reviewCourseReadability(courseId: string) {
+  return request<StudyWorkspace>(`/courses/${encodeURIComponent(courseId)}/readability-review`, { method: 'POST' })
+}
+
 export function getCourseMindMap(courseId: string) {
   return request<CourseMindMapApiResponse>(`/courses/${encodeURIComponent(courseId)}/mind-map`)
 }
@@ -231,6 +245,7 @@ export function saveCourseSetup(courseId: string, payload: {
   reviewCount: number
   examFormat: string
   remarks: string
+  contentStyle: 'standard' | 'dialogue' | 'story'
 }) {
   return request<StudyWorkspace>(`/courses/${encodeURIComponent(courseId)}/setup`, {
     method: 'POST',
@@ -244,6 +259,7 @@ export function saveCourseSetup(courseId: string, payload: {
       review_count: payload.reviewCount,
       exam_format: payload.examFormat,
       remarks: payload.remarks,
+      content_style: payload.contentStyle,
     }),
   })
 }
@@ -282,7 +298,7 @@ export function saveStrategyDocuments(
 
 export function approveStrategyDocuments(
   courseId: string,
-  payload: { reviewPlan: string; coursePrompt: string; reviewPlanVersion: number; coursePromptVersion: number },
+  payload: StrategyGenerationRequest,
 ) {
   return request<StudyWorkspace>(`/courses/${encodeURIComponent(courseId)}/strategy-documents/approve`, {
     method: 'POST',
@@ -291,13 +307,17 @@ export function approveStrategyDocuments(
       course_prompt: payload.coursePrompt,
       review_plan_version: payload.reviewPlanVersion,
       course_prompt_version: payload.coursePromptVersion,
+      repair_only: payload.repairOnly ?? false,
+      generation_mode: payload.generationMode ?? 'all',
+      lesson_limit: payload.lessonLimit ?? null,
+      continue_generation: payload.continueGeneration ?? false,
     }),
   })
 }
 
 export function approveStrategyDocumentsInBackground(
   courseId: string,
-  payload: { reviewPlan: string; coursePrompt: string; reviewPlanVersion: number; coursePromptVersion: number },
+  payload: StrategyGenerationRequest,
 ) {
   return request<{ jobId: string; courseId: string }>(`/courses/${encodeURIComponent(courseId)}/strategy-documents/approve-job`, {
     method: 'POST',
@@ -306,6 +326,10 @@ export function approveStrategyDocumentsInBackground(
       course_prompt: payload.coursePrompt,
       review_plan_version: payload.reviewPlanVersion,
       course_prompt_version: payload.coursePromptVersion,
+      repair_only: payload.repairOnly ?? false,
+      generation_mode: payload.generationMode ?? 'all',
+      lesson_limit: payload.lessonLimit ?? null,
+      continue_generation: payload.continueGeneration ?? false,
     }),
   })
 }
@@ -314,11 +338,57 @@ export function getAgentJob(jobId: string) {
   return request<AgentJob>(`/agent-jobs/${encodeURIComponent(jobId)}`)
 }
 
+export function cancelAgentJob(jobId: string) {
+  return request<AgentJob>(`/agent-jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' })
+}
+
 export function saveCoursePrompt(courseId: string, coursePrompt: string, version: number) {
   return request<StrategyDocuments>(`/courses/${encodeURIComponent(courseId)}/course-prompt`, {
     method: 'PUT',
     body: JSON.stringify({ course_prompt: coursePrompt, version }),
   })
+}
+
+export function submitCourseFeedback(courseId: string, payload: CourseFeedbackRequest) {
+  return request<CourseFeedbackSubmitResult>(`/courses/${encodeURIComponent(courseId)}/course-feedback`, {
+    method: 'POST',
+    body: JSON.stringify({
+      selected_text: payload.selectedText,
+      user_comment: payload.userComment,
+      context: payload.context ?? {},
+    }),
+  })
+}
+
+export function submitGlobalCourseFeedback(courseId: string, taskId: string, sectionId: string, sectionIndex: number, userComment: string) {
+  return request<GlobalCourseFeedbackResult>(`/courses/${encodeURIComponent(courseId)}/course-feedback/global`, {
+    method: 'POST',
+    body: JSON.stringify({ task_id: taskId, section_id: sectionId, section_index: sectionIndex, user_comment: userComment }),
+  }, 180000)
+}
+
+export function applyGlobalCourseFeedback(courseId: string, feedbackId: string) {
+  return request<CourseFeedbackApplyResult>(`/courses/${encodeURIComponent(courseId)}/course-feedback/${encodeURIComponent(feedbackId)}/global/apply`, {
+    method: 'POST',
+  }, 120000)
+}
+
+export function getCourseFeedbackRules(courseId: string) {
+  return request<CourseFeedbackRules>(`/courses/${encodeURIComponent(courseId)}/course-feedback/rules`)
+}
+
+export function refineCourseFeedbackRewrite(courseId: string, feedbackId: string, extraComment: string, previousRewrite: string) {
+  return request<CourseFeedbackRefineResult>(`/courses/${encodeURIComponent(courseId)}/course-feedback/${encodeURIComponent(feedbackId)}/rewrite/refine`, {
+    method: 'POST',
+    body: JSON.stringify({ extra_comment: extraComment, previous_rewrite: previousRewrite }),
+  }, 120000)
+}
+
+export function applyCourseFeedbackRewrite(courseId: string, feedbackId: string, originalText: string, rewrittenText: string, target: CourseFeedbackRequest['context']) {
+  return request<CourseFeedbackApplyResult>(`/courses/${encodeURIComponent(courseId)}/course-feedback/${encodeURIComponent(feedbackId)}/rewrite/apply`, {
+    method: 'POST',
+    body: JSON.stringify({ original_text: originalText, rewritten_text: rewrittenText, target: target ?? {} }),
+  }, 120000)
 }
 
 export function getCourseMaterialPreview(courseId: string, relativePath: string) {
@@ -339,13 +409,13 @@ export function rescanCourseMaterials(courseId: string) {
   return request<StudyWorkspace>(`/courses/${encodeURIComponent(courseId)}/materials/rescan`, { method: 'POST' })
 }
 
-export async function uploadCourseMaterials(courseId: string, files: FileList | File[]) {
+export async function uploadCourseMaterials(courseId: string, files: FileList | File[], role: 'primary' | 'supplementary' = 'supplementary') {
   const fileArray = Array.from(files)
   const manifest = fileArray.map((file) => ({ name: file.name, size: file.size, type: file.type }))
   const encoder = new TextEncoder()
   const manifestBytes = encoder.encode(JSON.stringify(manifest))
   const headerBytes = encoder.encode(`${manifestBytes.byteLength}\n`)
-  const response = await authFetch(`/courses/${encodeURIComponent(courseId)}/materials/upload-batch`, {
+  const response = await authFetch(`/courses/${encodeURIComponent(courseId)}/materials/upload-batch?role=${encodeURIComponent(role)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/octet-stream' },
     body: new Blob([headerBytes, manifestBytes, ...fileArray]),
@@ -353,6 +423,17 @@ export async function uploadCourseMaterials(courseId: string, files: FileList | 
   const body = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(typeof body.detail === 'string' ? body.detail : '资料批量导入失败')
   return body as StudyWorkspace
+}
+
+export function updateCourseMaterialRole(
+  courseId: string,
+  relativePath: string,
+  payload: { role: 'primary' | 'supplementary'; priorityOrder?: number },
+) {
+  return request<StudyWorkspace>(
+    `/courses/${encodeURIComponent(courseId)}/materials/${encodeMaterialPath(relativePath)}/role`,
+    { method: 'PATCH', body: JSON.stringify(payload) },
+  )
 }
 
 export function deleteCourseMaterial(courseId: string, relativePath: string) {
@@ -375,6 +456,58 @@ export function saveRuntimeModel(payload: { baseUrl: string; apiKey: string; mod
       model: payload.model,
     }),
   })
+}
+
+function normalizeAccountProfile(profile: AccountProfile & { display_name?: string; avatar_url?: string }): AccountProfile {
+  return {
+    id: profile.id,
+    email: profile.email,
+    displayName: profile.displayName ?? profile.display_name ?? '',
+    role: profile.role,
+    avatarUrl: profile.avatarUrl ?? profile.avatar_url ?? '',
+    gender: profile.gender ?? '',
+    age: profile.age ?? null,
+    signature: profile.signature ?? '',
+  }
+}
+
+export function getAccountProfile() {
+  return request<AccountProfile & { display_name?: string; avatar_url?: string }>('/account-profile').then(normalizeAccountProfile)
+}
+
+export function saveAccountProfile(payload: {
+  displayName: string
+  gender: string
+  age: number | null
+  signature: string
+}) {
+  return request<AccountProfile & { display_name?: string; avatar_url?: string }>('/account-profile', {
+    method: 'PUT',
+    body: JSON.stringify({
+      display_name: payload.displayName,
+      gender: payload.gender,
+      age: payload.age,
+      signature: payload.signature,
+    }),
+  }).then(normalizeAccountProfile)
+}
+
+async function parseAccountProfileResponse(response: Response, fallbackMessage: string) {
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(typeof body.detail === 'string' ? body.detail : fallbackMessage)
+  return normalizeAccountProfile(body as AccountProfile & { display_name?: string; avatar_url?: string })
+}
+
+export async function uploadAccountAvatar(file: File) {
+  const formData = new FormData()
+  formData.append('avatar', file)
+  const response = await authFetch('/account-profile/avatar', { method: 'POST', body: formData })
+  return parseAccountProfileResponse(response, '头像上传失败')
+}
+
+export async function deleteAccountAvatar() {
+  const response = await authFetch('/account-profile/avatar', { method: 'DELETE' })
+  return parseAccountProfileResponse(response, '头像删除失败')
 }
 
 export function getUserProfilePrompt() {
@@ -438,6 +571,17 @@ export function submitCourseWrongAnswerRetry(courseId: string, wrongAnswerId: st
   )
 }
 
+export function repairCourseMockQuestions(courseId: string, force = false) {
+  const query = force ? '?force=true' : ''
+  return request<{
+    workspace: StudyWorkspace
+    repaired: boolean
+    source: 'existing' | 'model' | 'fallback'
+    warning: string
+    questionCount: number
+  }>(`/courses/${encodeURIComponent(courseId)}/mock/repair${query}`, { method: 'POST' })
+}
+
 export function submitCourseMockAnswers(courseId: string, answers: Record<string, MockAnswer>) {
   return request<MockSubmitResult>(`/courses/${encodeURIComponent(courseId)}/mock/submit`, {
     method: 'POST',
@@ -492,7 +636,7 @@ type TimeLogResponse = {
 
 export function recordCourseTimeLog(
   courseId: string,
-  payload: { taskId?: string; minutes: number; date?: string; note?: string },
+  payload: { taskId?: string; minutes: number; date?: string; note?: string; clientEntryId?: string },
 ) {
   return request<TimeLogResponse>(`/courses/${encodeURIComponent(courseId)}/time-log`, {
     method: 'POST',
@@ -501,8 +645,25 @@ export function recordCourseTimeLog(
       minutes: payload.minutes,
       target_date: payload.date ?? '',
       note: payload.note ?? '',
+      client_entry_id: payload.clientEntryId ?? '',
     }),
   })
+}
+
+/** 页面离开时尽力写入整分钟；失败会由计时器保留的待提交记录在下次进入时重试。 */
+export function flushCourseTimeLog(courseId: string, minutes: number, clientEntryId: string): void {
+  void authFetch(`/courses/${encodeURIComponent(courseId)}/time-log`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    body: JSON.stringify({
+      task_id: '',
+      minutes,
+      target_date: '',
+      note: '',
+      client_entry_id: clientEntryId,
+    }),
+    keepalive: true,
+  }).catch(() => undefined)
 }
 
 export function deleteCourseTimeLog(courseId: string, entryId: string) {
@@ -670,6 +831,87 @@ export function applyCourseAdjustmentProposal(courseId: string, proposalId: stri
   )
 }
 
+export type StrategyRevisionHandlers = {
+  onToken: (text: string) => void
+  onDone: (result: StrategyRevisionStreamDone) => void
+  onError: (message: string) => void
+}
+
+/** 对话式修订策略草稿（SSE）。事件协议与 agent/chat/stream 一致：token / done / error。 */
+export function streamStrategyRevision(
+  courseId: string,
+  payload: { message: string; history: StrategyRevisionMessage[]; reviewPlan: string; coursePrompt: string },
+  handlers: StrategyRevisionHandlers,
+): AgentStreamHandle {
+  const controller = new AbortController()
+  let cancelled = false
+
+  void (async () => {
+    let response: Response
+    try {
+      response = await authFetch(
+        `/courses/${encodeURIComponent(courseId)}/strategy-documents/revise`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: payload.message,
+            history: payload.history.map(({ role, content }) => ({ role, content })),
+            review_plan: payload.reviewPlan,
+            course_prompt: payload.coursePrompt,
+          }),
+          signal: controller.signal,
+        },
+      )
+    } catch (error) {
+      if (!cancelled) handlers.onError(error instanceof Error ? error.message : '无法连接策略修订接口。')
+      return
+    }
+    if (!response.ok || !response.body) {
+      if (!cancelled) handlers.onError(`策略修订接口返回异常（HTTP ${response.status}）。`)
+      return
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder('utf-8')
+    let buffer = ''
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        let separatorIndex = buffer.indexOf('\n\n')
+        while (separatorIndex >= 0) {
+          const rawEvent = buffer.slice(0, separatorIndex)
+          buffer = buffer.slice(separatorIndex + 2)
+          parseAgentSseEvent(rawEvent, {
+            onToken: handlers.onToken,
+            onDone: (result) => handlers.onDone(result as unknown as StrategyRevisionStreamDone),
+            onError: handlers.onError,
+          })
+          separatorIndex = buffer.indexOf('\n\n')
+        }
+      }
+      if (buffer.trim()) {
+        parseAgentSseEvent(buffer, {
+          onToken: handlers.onToken,
+          onDone: (result) => handlers.onDone(result as unknown as StrategyRevisionStreamDone),
+          onError: handlers.onError,
+        })
+      }
+    } catch (error) {
+      if (!cancelled) handlers.onError(error instanceof Error ? error.message : '读取策略修订流失败。')
+    }
+  })()
+
+  return {
+    cancel: () => {
+      cancelled = true
+      controller.abort()
+    },
+  }
+}
+
 export function dismissCourseAdjustmentProposal(courseId: string, proposalId: string) {
   return request<AdjustmentProposal>(
     `/courses/${encodeURIComponent(courseId)}/adjustment-proposals/${encodeURIComponent(proposalId)}/dismiss`,
@@ -801,6 +1043,14 @@ export async function listArchiveItems() {
   return archiveItems.map(toArchiveItem)
 }
 
+export async function permanentlyDeleteArchiveItem(archiveId: string) {
+  const response = await request<{ deleted: boolean; archive_items: ArchiveItemApiResponse[] }>(
+    `/archive/${encodeURIComponent(archiveId)}`,
+    { method: 'DELETE' },
+  )
+  return { deleted: response.deleted, archiveItems: response.archive_items.map(toArchiveItem) }
+}
+
 export async function restoreArchiveItem(archiveId: string) {
   const response = await request<RestoreArchiveApiResponse>(`/archive/${encodeURIComponent(archiveId)}/restore`, {
     method: 'POST',
@@ -852,6 +1102,11 @@ export type GlossaryStatusApiResponse = {
   status: 'idle' | 'generating' | 'ready' | 'failed'
   termsTotal: number
   termsActive: number
+  candidatesTotal?: number
+  termsCompleted?: number
+  phase?: 'idle' | 'scanning' | 'composing' | 'finalizing' | 'ready' | 'failed'
+  startedAt?: string
+  progressUpdatedAt?: string
   lastError: string
   lastRefreshedAt: string
 }
@@ -881,6 +1136,11 @@ export function toGlossaryStatus(courseId: string, response: GlossaryStatusApiRe
     status: response.status ?? 'idle',
     termsTotal: response.termsTotal ?? 0,
     termsActive: response.termsActive ?? 0,
+    candidatesTotal: response.candidatesTotal ?? 0,
+    termsCompleted: response.termsCompleted ?? 0,
+    phase: response.phase ?? (response.status === 'generating' ? 'scanning' : response.status ?? 'idle'),
+    startedAt: response.startedAt ?? '',
+    progressUpdatedAt: response.progressUpdatedAt ?? '',
     lastError: response.lastError ?? '',
     lastRefreshedAt: response.lastRefreshedAt ?? '',
   }

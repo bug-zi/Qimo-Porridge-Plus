@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -89,11 +91,120 @@ def row_to_archive_item(row: sqlite3.Row) -> ArchiveItemResponse:
     )
 
 
-def purge_expired_archive_items(connection: sqlite3.Connection) -> None:
-    connection.execute(
-        "DELETE FROM archived_items WHERE purge_after <= ?",
+def _delete_material_caches(course_directory: Path) -> None:
+    """删除课程资料生成的解析/预览缓存（缓存键包含文件绝对路径和 stat）。"""
+    cache_directory = DATA_DIRECTORY / "material_cache"
+    if not course_directory.exists() or not cache_directory.exists():
+        return
+    for file_path in course_directory.rglob("*"):
+        if not file_path.is_file():
+            continue
+        try:
+            stat = file_path.stat()
+            raw_key = f"{file_path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}"
+            cache_key = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:24]
+            for cache_path in cache_directory.glob(f"*-{cache_key}.*"):
+                cache_path.unlink(missing_ok=True)
+        except OSError:
+            # 单个缓存或资料文件被占用时不阻断其余课程数据的清理。
+            continue
+
+
+def permanently_delete_course_data(connection: sqlite3.Connection, course_id: str) -> None:
+    """彻底清理课程在 data 目录、主库及向量缓存库中的全部持久化数据。"""
+    course_directory = DATA_DIRECTORY / "courses" / course_id
+    _delete_material_caches(course_directory)
+
+    existing_tables = {
+        str(row[0])
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    }
+
+    def ids_for(table: str, id_column: str = "id") -> list[str]:
+        if table not in existing_tables:
+            return []
+        return [
+            str(row[0])
+            for row in connection.execute(
+                f"SELECT {id_column} FROM {table} WHERE course_id = ?", (course_id,)
+            ).fetchall()
+        ]
+
+    chunk_ids = ids_for("material_chunks")
+    memory_ids = ids_for("learner_memories")
+    run_ids = ids_for("agent_runs")
+
+    if chunk_ids:
+        try:
+            connection.executemany("DELETE FROM material_chunks_fts WHERE chunk_id = ?", [(item,) for item in chunk_ids])
+        except sqlite3.OperationalError:
+            pass
+    if memory_ids and "memory_evidence" in existing_tables:
+        connection.executemany("DELETE FROM memory_evidence WHERE memory_id = ?", [(item,) for item in memory_ids])
+    if run_ids and "agent_steps" in existing_tables:
+        connection.executemany("DELETE FROM agent_steps WHERE run_id = ?", [(item,) for item in run_ids])
+
+    for table in (
+        "plan_tasks",
+        "agent_jobs",
+        "artifacts",
+        "adjustment_proposals",
+        "external_sources",
+        "glossary_terms",
+        "glossary_refresh_state",
+        "knowledge_materials",
+        "material_chunks",
+        "chat_turns",
+        "learning_events",
+        "review_sections",
+        "chat_summaries",
+        "learner_memories",
+        "agent_runs",
+    ):
+        if table in existing_tables:
+            connection.execute(f"DELETE FROM {table} WHERE course_id = ?", (course_id,))
+    if "courses" in existing_tables:
+        connection.execute("DELETE FROM courses WHERE id = ?", (course_id,))
+
+    embedding_path = DATA_DIRECTORY / "embedding_cache.db"
+    if embedding_path.exists() and (chunk_ids or memory_ids):
+        with sqlite3.connect(embedding_path, timeout=30) as embedding_connection:
+            if chunk_ids:
+                embedding_connection.executemany(
+                    "DELETE FROM chunk_embeddings WHERE chunk_id = ?", [(item,) for item in chunk_ids]
+                )
+            if memory_ids:
+                embedding_connection.executemany(
+                    "DELETE FROM memory_embeddings WHERE memory_id = ?", [(item,) for item in memory_ids]
+                )
+
+    if course_directory.exists():
+        shutil.rmtree(course_directory)
+
+
+def permanently_delete_archive_item(connection: sqlite3.Connection, archive_id: str, owner_id: str | None = None) -> bool:
+    query = "SELECT id, item_type, entity_id, course_id FROM archived_items WHERE id = ?"
+    parameters: tuple[str, ...] = (archive_id,)
+    if owner_id is not None:
+        query += " AND owner_id = ?"
+        parameters = (archive_id, owner_id)
+    row = connection.execute(query, parameters).fetchone()
+    if row is None:
+        return False
+    if row["item_type"] == "course":
+        permanently_delete_course_data(connection, str(row["course_id"] or row["entity_id"]))
+    connection.execute("DELETE FROM archived_items WHERE id = ?", (archive_id,))
+    return True
+
+
+def purge_expired_archive_items(connection: sqlite3.Connection) -> int:
+    rows = connection.execute(
+        "SELECT id FROM archived_items WHERE purge_after <= ?",
         (datetime.now().isoformat(timespec="seconds"),),
-    )
+    ).fetchall()
+    for row in rows:
+        permanently_delete_archive_item(connection, str(row["id"]))
+    return len(rows)
 
 
 def list_active_archive_items(

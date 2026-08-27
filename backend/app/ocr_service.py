@@ -24,8 +24,14 @@ OCR_MIN_CHARS_PER_PAGE = 200
 VISION_FALLBACK_MAX_PAGES = 30
 # PDF 渲染 DPI（150 对印刷体扫描件足够，300 速度减半收益有限）。
 PDF_RENDER_DPI = 150
-# PyMuPDF 单文件最多渲染页数（与预览、兜底共用同一上限）。
-PDF_RENDER_MAX_PAGES = 60
+# 默认处理整份 PDF，避免长扫描教材只索引前几十页。可通过环境变量显式限制。
+# 0 表示不限制；视觉模型兜底仍由 VISION_FALLBACK_MAX_PAGES 单独限流。
+import os
+PDF_RENDER_MAX_PAGES = max(0, int(os.getenv("PDF_OCR_MAX_PAGES", "0")))
+
+
+def _page_limit(page_count: int) -> int:
+    return min(page_count, PDF_RENDER_MAX_PAGES) if PDF_RENDER_MAX_PAGES else page_count
 
 _RAPIDOCR_LOCK = threading.Lock()
 _RAPIDOCR_INSTANCE: Any | None = None
@@ -48,11 +54,14 @@ def _get_rapidocr() -> tuple[Any | None, str]:
         if _RAPIDOCR_ERROR:
             return None, _RAPIDOCR_ERROR
         try:
-            from rapidocr_onnxruntime import RapidOCR
+            try:
+                from rapidocr import RapidOCR
+            except ImportError:  # 兼容 Python 3.12 及以下的旧发行包
+                from rapidocr_onnxruntime import RapidOCR
 
             _RAPIDOCR_INSTANCE = RapidOCR()
         except Exception as error:  # pragma: no cover - 依赖缺失场景
-            _RAPIDOCR_ERROR = f"RapidOCR 未安装或不可用：{error}（pip install rapidocr_onnxruntime）"
+            _RAPIDOCR_ERROR = f"RapidOCR 未安装或不可用：{error}（pip install rapidocr）"
             return None, _RAPIDOCR_ERROR
     return _RAPIDOCR_INSTANCE, ""
 
@@ -89,7 +98,12 @@ def _rapidocr_image_bytes(engine: Any, image_bytes: bytes) -> str:
 
     RapidOCR 原生支持 bytes 输入（内部 cv2.imdecode 自动解码 PNG）。
     """
-    result, _ = engine(image_bytes)
+    output = engine(image_bytes)
+    # rapidocr 3.x 返回 RapidOCROutput；旧 rapidocr-onnxruntime 返回 (result, elapsed)。
+    modern_texts = getattr(output, "txts", None)
+    if modern_texts is not None:
+        return "\n".join(str(text).strip() for text in modern_texts if str(text).strip())
+    result = output[0] if isinstance(output, tuple) else output
     if not result:
         return ""
     lines: list[str] = []
@@ -130,7 +144,7 @@ def extract_scanned_pdf_with_rapidocr(file_path: Path) -> tuple[str, str]:
         return "", f"PDF 打开失败：{open_error}"
     try:
         sections: list[str] = []
-        page_count = min(doc.page_count, PDF_RENDER_MAX_PAGES)
+        page_count = _page_limit(doc.page_count)
         for page_index in range(page_count):
             page = doc.load_page(page_index)
             zoom = PDF_RENDER_DPI / 72
@@ -173,7 +187,7 @@ def render_pdf_pages_as_images(file_path: Path) -> list[tuple[int, bytes]]:
     try:
         pages: list[tuple[int, bytes]] = []
         zoom = PDF_RENDER_DPI / 72
-        count = min(doc.page_count, PDF_RENDER_MAX_PAGES)
+        count = _page_limit(doc.page_count)
         for page_index in range(count):
             page = doc.load_page(page_index)
             pixmap = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))

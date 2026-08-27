@@ -17,6 +17,7 @@ export type AuthUser = {
   email: string
   displayName: string
   role: string
+  avatarUrl: string
 }
 
 export const AUTH_EXPIRED_EVENT = 'final-congee-auth-expired'
@@ -52,7 +53,7 @@ export function getStoredUser(): AuthUser | null {
   try {
     const parsed = JSON.parse(raw) as AuthUser
     if (!parsed.id || !parsed.email) return null
-    return { ...parsed, displayName: parsed.displayName || parsed.email }
+    return { ...parsed, displayName: parsed.displayName || parsed.email, avatarUrl: parsed.avatarUrl || '' }
   } catch {
     return null
   }
@@ -70,6 +71,7 @@ export function saveSession(payload: {
     email: payload.user.email,
     displayName: payload.user.display_name || payload.user.email,
     role: payload.user.role || 'user',
+    avatarUrl: '',
   }
   writeStored(USER_KEY, JSON.stringify(user))
   return user
@@ -79,6 +81,14 @@ export function clearSession(): void {
   writeStored(ACCESS_TOKEN_KEY, '')
   writeStored(REFRESH_TOKEN_KEY, '')
   writeStored(USER_KEY, '')
+}
+
+export function updateStoredUser(patch: Partial<AuthUser>): AuthUser | null {
+  const current = getStoredUser()
+  if (!current) return null
+  const next = { ...current, ...patch }
+  writeStored(USER_KEY, JSON.stringify(next))
+  return next
 }
 
 /** 已登录判定：有 refresh token 即视为会话存在（access 可刷新）。 */
@@ -186,7 +196,7 @@ function refreshTokensQueued(): Promise<boolean> {
 /* authFetch：带 token 的请求 + 401 刷新重放                            */
 
 export async function authFetch(path: string, init?: RequestInit): Promise<Response> {
-  const fullPath = path.startsWith('/api') ? path : `/api${path}`
+  const fullPath = /^(?:https?:)?\/\//.test(path) || path.startsWith('/api') ? path : `/api${path}`
   const withAuth = async (): Promise<Response> => {
     const token = getAccessToken()
     const headers = new Headers(init?.headers)

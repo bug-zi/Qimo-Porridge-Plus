@@ -10,6 +10,7 @@ users / refresh_tokens 两张表 + JWT（access 30min + refresh 30天）+ bcrypt
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import os
 import secrets
@@ -95,6 +96,17 @@ def initialize_auth_database() -> None:
             CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id);
             """
         )
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
+        for column_name, definition in {
+            "avatar_url": "TEXT NOT NULL DEFAULT ''",
+            "avatar_data": "BLOB",
+            "avatar_mime_type": "TEXT NOT NULL DEFAULT ''",
+            "gender": "TEXT NOT NULL DEFAULT ''",
+            "age": "INTEGER",
+            "signature": "TEXT NOT NULL DEFAULT ''",
+        }.items():
+            if column_name not in columns:
+                connection.execute(f"ALTER TABLE users ADD COLUMN {column_name} {definition}")
         # 顺手清理：启动时删除已过期 refresh token（物理删除，摘要无留存价值）
         connection.execute(
             "DELETE FROM refresh_tokens WHERE expires_at <= ?",
@@ -309,6 +321,96 @@ def get_user_by_id(user_id: str) -> dict[str, Any] | None:
     if row is None:
         return None
     return {"id": row["id"], "email": row["email"], "display_name": row["display_name"], "role": row["role"]}
+
+
+def get_account_profile(user_id: str) -> dict[str, Any] | None:
+    """读取设置页展示/编辑的账号资料。"""
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT id, email, display_name, role, avatar_url, avatar_data, avatar_mime_type, gender, age, signature
+            FROM users
+            WHERE id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "email": row["email"],
+        "display_name": row["display_name"],
+        "role": row["role"],
+        "avatar_url": (
+            f"data:{row["avatar_mime_type"]};base64,{base64.b64encode(row["avatar_data"]).decode("ascii")}"
+            if row["avatar_data"] and row["avatar_mime_type"]
+            else ""
+        ),
+        "gender": row["gender"] or "",
+        "age": row["age"],
+        "signature": row["signature"] or "",
+    }
+
+
+def update_account_profile(
+    user_id: str,
+    *,
+    display_name: str,
+    gender: str,
+    age: int | None,
+    signature: str,
+) -> dict[str, Any] | None:
+    """更新账号资料，持久化到 users 表。"""
+    normalized_display_name = display_name.strip()
+    if not normalized_display_name:
+        raise ValueError("用户名不能为空")
+    if len(normalized_display_name) > 40:
+        raise ValueError("用户名不能超过 40 字")
+    normalized_gender = gender.strip()
+    if len(normalized_gender) > 20:
+        raise ValueError("性别不能超过 20 字")
+    if age is not None and (age < 0 or age > 150):
+        raise ValueError("年龄需要在 0 到 150 之间")
+    normalized_signature = signature.strip()
+    if len(normalized_signature) > 200:
+        raise ValueError("个性签名不能超过 200 字")
+
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE users
+            SET display_name = ?, gender = ?, age = ?, signature = ?
+            WHERE id = ?
+            """,
+            (normalized_display_name, normalized_gender, age, normalized_signature, user_id),
+        )
+        if cursor.rowcount == 0:
+            return None
+    return get_account_profile(user_id)
+
+
+def save_account_avatar(user_id: str, image_data: bytes, mime_type: str) -> dict[str, Any] | None:
+    """将用户头像二进制直接保存到账号数据库。"""
+    with get_connection() as connection:
+        cursor = connection.execute(
+            "UPDATE users SET avatar_data = ?, avatar_mime_type = ?, avatar_url = '' WHERE id = ?",
+            (image_data, mime_type, user_id),
+        )
+        if cursor.rowcount == 0:
+            return None
+    return get_account_profile(user_id)
+
+
+def delete_account_avatar(user_id: str) -> dict[str, Any] | None:
+    """清除数据库中保存的用户头像。"""
+    with get_connection() as connection:
+        cursor = connection.execute(
+            "UPDATE users SET avatar_data = NULL, avatar_mime_type = '', avatar_url = '' WHERE id = ?",
+            (user_id,),
+        )
+        if cursor.rowcount == 0:
+            return None
+    return get_account_profile(user_id)
 
 
 def issue_token_pair(user: dict[str, Any]) -> dict[str, Any]:

@@ -8,19 +8,24 @@ import {
   EyeOff,
   KeyRound,
   Link2,
+  LogOut,
   LoaderCircle,
   Moon,
   PlugZap,
   RefreshCw,
   Save,
   Sparkles,
+  Trash2,
+  Upload,
   Sun,
   UserRound,
 } from 'lucide-react'
 import {
+  deleteAccountAvatar,
   discoverMcpServer,
   getBilibiliCredentialStatus,
   getEmbeddingProfile,
+  getAccountProfile,
   getKnowledgeBaseStatus,
   getUserProfilePrompt,
   listMcpServers,
@@ -28,13 +33,15 @@ import {
   saveEmbeddingProfile,
   saveMcpServer,
   saveRuntimeModel,
+  saveAccountProfile,
   saveUserProfilePrompt,
   testEmbeddingProfile,
   toRuntimeModelProfile,
+  uploadAccountAvatar,
   isDemoMode,
 } from '../apiClient'
 import { BilibiliCredentialDialog } from './BilibiliCredentialDialog'
-import { authFetch } from '../auth'
+import { authFetch, type AuthUser } from '../auth'
 import type {
   BilibiliCredentialStatus,
   EmbeddingProfile,
@@ -56,6 +63,9 @@ type SettingsViewProps = {
   onThemeChange: (theme: 'light' | 'dark') => void
   onUiFontChange: (font: UiFont) => void
   onUiFontSizeChange: (fontSize: UiFontSize) => void
+  authUser: AuthUser | null
+  onAuthUserChange: (user: AuthUser) => void
+  onLogout?: () => void
 }
 
 type ProviderPreset = {
@@ -258,6 +268,9 @@ export function SettingsView({
   onThemeChange,
   onUiFontChange,
   onUiFontSizeChange,
+  authUser,
+  onAuthUserChange,
+  onLogout,
 }: SettingsViewProps) {
   const [draft, setDraft] = useState(modelProfile)
   const [isApiKeyVisible, setIsApiKeyVisible] = useState(false)
@@ -272,6 +285,15 @@ export function SettingsView({
   const [mcpMessage, setMcpMessage] = useState('')
   const [bilibiliStatus, setBilibiliStatus] = useState<BilibiliCredentialStatus | null>(null)
   const [isBilibiliDialogOpen, setIsBilibiliDialogOpen] = useState(false)
+  const [accountProfileDraft, setAccountProfileDraft] = useState({
+    displayName: authUser?.displayName ?? '',
+    avatarUrl: '',
+    gender: '',
+    age: '',
+    signature: '',
+  })
+  const [accountProfileAction, setAccountProfileAction] = useState<'idle' | 'loading' | 'saving' | 'uploading'>('loading')
+  const [accountProfileMessage, setAccountProfileMessage] = useState('')
   const [userProfilePrompt, setUserProfilePrompt] = useState('')
   const [userProfileUpdatedAt, setUserProfileUpdatedAt] = useState('')
   const [userProfileAction, setUserProfileAction] = useState<'idle' | 'loading' | 'saving'>('loading')
@@ -291,7 +313,12 @@ export function SettingsView({
     void Promise.all([getEmbeddingProfile(), getKnowledgeBaseStatus(courseId)])
       .then(([embedding, knowledge]) => {
         if (isCancelled) return
-        setEmbeddingDraft(embedding)
+        setEmbeddingDraft({
+          ...embedding,
+          indexedChunks: knowledge.embedding.indexedChunks,
+          totalChunks: knowledge.embedding.totalChunks,
+          dimension: knowledge.embedding.dimension || embedding.dimension,
+        })
         setKnowledgeStatus(knowledge)
       })
       .catch((error) => {
@@ -330,6 +357,32 @@ export function SettingsView({
 
   useEffect(() => {
     refreshBilibiliStatus()
+  }, [])
+
+  useEffect(() => {
+    let isCancelled = false
+    setAccountProfileAction('loading')
+    void getAccountProfile()
+      .then((profile) => {
+        if (isCancelled) return
+        setAccountProfileDraft({
+          displayName: profile.displayName || profile.email,
+          avatarUrl: profile.avatarUrl,
+          gender: profile.gender,
+          age: profile.age === null ? '' : String(profile.age),
+          signature: profile.signature,
+        })
+        setAccountProfileMessage('')
+      })
+      .catch((error) => {
+        if (!isCancelled) setAccountProfileMessage(error instanceof Error ? error.message : '无法读取个人信息。')
+      })
+      .finally(() => {
+        if (!isCancelled) setAccountProfileAction('idle')
+      })
+    return () => {
+      isCancelled = true
+    }
   }, [])
 
   useEffect(() => {
@@ -644,6 +697,106 @@ export function SettingsView({
     }
   }
 
+  function updateAccountProfileDraft(key: keyof typeof accountProfileDraft, value: string) {
+    setAccountProfileDraft((current) => ({ ...current, [key]: value }))
+  }
+
+  async function saveAccountProfileSettings() {
+    const displayName = accountProfileDraft.displayName.trim()
+    if (!displayName) {
+      setAccountProfileMessage('用户名不能为空。')
+      return
+    }
+    const ageText = accountProfileDraft.age.trim()
+    const age = ageText ? Number(ageText) : null
+    if (ageText && (age === null || !Number.isInteger(age) || age < 0 || age > 150)) {
+      setAccountProfileMessage('年龄需要填写 0 到 150 之间的整数。')
+      return
+    }
+    setAccountProfileAction('saving')
+    setAccountProfileMessage('')
+    try {
+      const profile = await saveAccountProfile({
+        displayName,
+        gender: accountProfileDraft.gender,
+        age,
+        signature: accountProfileDraft.signature,
+      })
+      setAccountProfileDraft({
+        displayName: profile.displayName || profile.email,
+        avatarUrl: profile.avatarUrl,
+        gender: profile.gender,
+        age: profile.age === null ? '' : String(profile.age),
+        signature: profile.signature,
+      })
+      onAuthUserChange({
+        id: profile.id,
+        email: profile.email,
+        displayName: profile.displayName || profile.email,
+        role: profile.role,
+        avatarUrl: profile.avatarUrl,
+      })
+      setAccountProfileMessage('个人信息已保存。')
+    } catch (error) {
+      setAccountProfileMessage(error instanceof Error ? error.message : '个人信息保存失败。')
+    } finally {
+      setAccountProfileAction('idle')
+    }
+  }
+
+  async function handleAvatarFile(file: File | undefined) {
+    if (!file) return
+    if (!file.type.startsWith('image/')) {
+      setAccountProfileMessage('请选择图片文件。')
+      return
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      setAccountProfileMessage('头像图片不能超过 2 MB。')
+      return
+    }
+    setAccountProfileAction('uploading')
+    setAccountProfileMessage('')
+    try {
+      const profile = await uploadAccountAvatar(file)
+      setAccountProfileDraft((current) => ({ ...current, avatarUrl: profile.avatarUrl }))
+      onAuthUserChange({
+        id: profile.id,
+        email: profile.email,
+        displayName: profile.displayName || profile.email,
+        role: profile.role,
+        avatarUrl: profile.avatarUrl,
+      })
+      setAccountProfileMessage('头像已上传并保存到数据库。')
+    } catch (error) {
+      setAccountProfileMessage(error instanceof Error ? error.message : '头像上传失败。')
+    } finally {
+      setAccountProfileAction('idle')
+    }
+  }
+
+  async function removeAccountAvatar() {
+    setAccountProfileAction('uploading')
+    setAccountProfileMessage('')
+    try {
+      const profile = await deleteAccountAvatar()
+      setAccountProfileDraft((current) => ({ ...current, avatarUrl: profile.avatarUrl }))
+      onAuthUserChange({
+        id: profile.id,
+        email: profile.email,
+        displayName: profile.displayName || profile.email,
+        role: profile.role,
+        avatarUrl: profile.avatarUrl,
+      })
+      setAccountProfileMessage('头像已删除。')
+    } catch (error) {
+      setAccountProfileMessage(error instanceof Error ? error.message : '头像删除失败。')
+    } finally {
+      setAccountProfileAction('idle')
+    }
+  }
+
+  const accountAvatarInitial = (accountProfileDraft.displayName || authUser?.email || '用').trim().slice(0, 1).toUpperCase()
+
   async function saveUserProfileSettings() {
     if (userProfilePrompt.length > userProfilePromptMaxLength) {
       setUserProfileMessage(`用户自画像不能超过 ${userProfilePromptMaxLength} 字。`)
@@ -690,6 +843,100 @@ export function SettingsView({
         <div className={`connection-status ${currentStatus.tone}`}>
           <StatusIcon size={16} />
           <span>{currentStatus.label}</span>
+        </div>
+      </section>
+
+      <section className="settings-panel account-settings-panel">
+        <header className="settings-panel-heading">
+          <div className="account-avatar-preview" aria-hidden="true">
+            {accountProfileDraft.avatarUrl ? <img src={accountProfileDraft.avatarUrl} alt="" /> : <span>{accountAvatarInitial}</span>}
+          </div>
+          <div>
+            <h2>个人信息</h2>
+            <p>{authUser?.email || '当前登录用户'} · 这些资料会长期保存到账号数据库。</p>
+          </div>
+        </header>
+
+        <div className="account-profile-grid">
+          <label className="settings-field">
+            <span>用户名</span>
+            <input
+              value={accountProfileDraft.displayName}
+              maxLength={40}
+              disabled={accountProfileAction === 'loading'}
+              onChange={(event) => updateAccountProfileDraft('displayName', event.target.value)}
+            />
+          </label>
+          <label className="settings-field">
+            <span>性别</span>
+            <input
+              value={accountProfileDraft.gender}
+              maxLength={20}
+              placeholder="例如：女 / 男 / 保密"
+              disabled={accountProfileAction === 'loading'}
+              onChange={(event) => updateAccountProfileDraft('gender', event.target.value)}
+            />
+          </label>
+          <label className="settings-field">
+            <span>年龄</span>
+            <input
+              type="number"
+              min="0"
+              max="150"
+              step="1"
+              value={accountProfileDraft.age}
+              placeholder="可选"
+              disabled={accountProfileAction === 'loading'}
+              onChange={(event) => updateAccountProfileDraft('age', event.target.value)}
+            />
+          </label>
+          <div className="settings-field settings-field-wide">
+            <span>头像</span>
+            <div className="account-avatar-upload">
+              <label className="secondary-button account-avatar-upload-button">
+                <Upload size={16} />
+                {accountProfileAction === 'uploading' ? '处理中' : accountProfileDraft.avatarUrl ? '更换图片' : '上传图片'}
+                <input
+                  type="file"
+                  accept="image/jpeg,image/png,image/gif,image/webp"
+                  disabled={accountProfileAction !== 'idle'}
+                  onChange={(event) => {
+                    void handleAvatarFile(event.target.files?.[0])
+                    event.target.value = ''
+                  }}
+                />
+              </label>
+              {accountProfileDraft.avatarUrl && (
+                <button className="secondary-button" type="button" disabled={accountProfileAction !== 'idle'} onClick={() => void removeAccountAvatar()}>
+                  <Trash2 size={16} /> 删除头像
+                </button>
+              )}
+              <small>支持 JPG、PNG、GIF、WebP，最大 2 MB；上传后直接保存到账号数据库。</small>
+            </div>
+          </div>
+          <label className="settings-field settings-field-wide">
+            <span>个性签名</span>
+            <textarea
+              className="account-signature-textarea"
+              value={accountProfileDraft.signature}
+              maxLength={200}
+              placeholder="写一句介绍自己或当前学习目标的话"
+              disabled={accountProfileAction === 'loading'}
+              onChange={(event) => updateAccountProfileDraft('signature', event.target.value)}
+            />
+          </label>
+        </div>
+
+        <div className="settings-actions account-profile-actions">
+          <button className="primary-button" type="button" disabled={accountProfileAction !== 'idle'} onClick={saveAccountProfileSettings}>
+            <Save size={16} /> {accountProfileAction === 'saving' ? '保存中' : '保存个人信息'}
+          </button>
+          {onLogout && (
+            <button className="secondary-button" type="button" onClick={onLogout}>
+              <LogOut size={16} /> 退出登录
+            </button>
+          )}
+          {accountProfileMessage && <span className="settings-message">{accountProfileMessage}</span>}
         </div>
       </section>
 

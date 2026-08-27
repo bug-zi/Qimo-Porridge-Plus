@@ -16,6 +16,7 @@ from ..study_service import (
     refresh_workspace_materials,
     resolve_converted_material_pdf_path,
     resolve_course_material_path,
+    update_course_material_role,
     upload_course_materials,
 )
 from .deps import require_course_ownership
@@ -100,11 +101,39 @@ async def upload_course_material_batch(
             offset = next_offset
         if offset != len(payload):
             raise ValueError("批量上传数据长度不匹配")
-        workspace = upload_course_materials(files, course_id)
+        role = str(request.query_params.get("role") or "supplementary")
+        workspace = upload_course_materials(files, course_id, role=role)
         if mark_strategy_maintenance_pending(course_id, "课程资料发生变化"):
             enqueue_agent_job(course_id, "maintain_review_plan", {"event": "课程资料发生变化"})
             enqueue_agent_job(course_id, "glossary_refresh", {"event": "课程资料发生变化"}, max_attempts=2)
         return workspace
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@router.patch("/api/courses/{course_id}/materials/{material_path:path}/role")
+async def update_generic_course_material_role(
+    course_id: str,
+    material_path: str,
+    request: FastAPIRequest,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("资料角色请求格式无效")
+        workspace = update_course_material_role(
+            material_path,
+            str(payload.get("role") or "supplementary"),
+            course_id,
+            priority_order=payload.get("priorityOrder") if payload.get("priorityOrder") is not None else None,
+        )
+        if mark_strategy_maintenance_pending(course_id, "资料主辅角色发生变化"):
+            enqueue_agent_job(course_id, "maintain_review_plan", {"event": "资料主辅角色发生变化"})
+            enqueue_agent_job(course_id, "glossary_refresh", {"event": "资料主辅角色发生变化"}, max_attempts=2)
+        return workspace
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 

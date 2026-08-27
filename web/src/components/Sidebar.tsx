@@ -10,12 +10,11 @@ import {
   FileArchive,
   FileText,
   Grid2X2,
-  LogOut,
+  LibraryBig,
   Network,
   Orbit,
   Plus,
   Sigma,
-  SquarePen,
   Settings2,
   Target,
   Trash2,
@@ -32,8 +31,6 @@ import {
 type MainNavigationProps = {
   activeModule: LearningModule
   onModuleChange: (module: LearningModule) => void
-  onLogout?: () => void
-  userName?: string
 }
 
 type CoursePanelProps = {
@@ -51,10 +48,10 @@ const moduleItems: { id: LearningModule; label: string; icon: typeof CircleCheck
   { id: 'materials', label: '资料库', icon: FileArchive },
   { id: 'planning', label: '规划', icon: CalendarDays },
   { id: 'mindmap', label: '知识地图', icon: Network },
+  { id: 'glossary', label: '专业名词', icon: LibraryBig },
   { id: 'plan', label: '复习主线', icon: CircleCheck },
   { id: 'practice', label: '刷题', icon: Target },
   { id: 'mock', label: '模拟卷', icon: ClipboardList },
-  { id: 'notes', label: '笔记', icon: SquarePen },
   { id: 'errors', label: '错题本', icon: FileText },
   { id: 'archive', label: '归档', icon: ArchiveRestore },
 ]
@@ -77,7 +74,7 @@ function CourseGlyph({ course }: { course: Course }) {
   }
 }
 
-export function MainNavigation({ activeModule, onModuleChange, onLogout, userName }: MainNavigationProps) {
+export function MainNavigation({ activeModule, onModuleChange }: MainNavigationProps) {
   return (
     <aside className="main-navigation">
       <button className="brand-button" type="button" aria-label="返回课程总览" onClick={() => onModuleChange('overview')}>
@@ -104,18 +101,6 @@ export function MainNavigation({ activeModule, onModuleChange, onLogout, userNam
       </div>
 
       <div className="nav-bottom">
-        {userName && <span className="nav-user" title={userName}>{userName}</span>}
-        {onLogout && (
-          <button
-            className="nav-item"
-            type="button"
-            title="退出登录"
-            onClick={onLogout}
-          >
-            <LogOut size={20} />
-            <span>退出登录</span>
-          </button>
-        )}
         <button
           className={`nav-item ${activeModule === 'settings' ? 'is-active' : ''}`}
           type="button"

@@ -52,16 +52,16 @@ class TestRapidOcrPipeline:
         pdf_path = _make_scanned_pdf(
             tmp_path / "scanned.pdf",
             [
-                ["Engineering Economics Final Exam", "Net Present Value Basics"],
-                ["Chapter 3 Cash Flow Analysis", "Annual Worth Method"],
+                ["Comprehensive Final Exam", "Reading Comprehension Basics"],
+                ["Chapter 3 Evidence Analysis", "Written Response Method"],
             ],
         )
         text, extract_error = ocr_service.extract_scanned_pdf_with_rapidocr(pdf_path)
         assert extract_error == ""
-        assert "Engineering" in text
+        assert "Comprehensive" in text
         assert "<!-- 第 1 页 -->" in text
         assert "<!-- 第 2 页 -->" in text
-        assert "Cash Flow" in text
+        assert "Evidence" in text
 
     def test_text_pdf_also_readable(self, tmp_path: Path) -> None:
         """普通文本 PDF 走 OCR 也能出字（渲染的是位图，同样可识别）。"""
@@ -70,13 +70,13 @@ class TestRapidOcrPipeline:
             pytest.skip(f"RapidOCR 不可用：{error}")
         doc = pymupdf.open()
         page = doc.new_page()
-        page.insert_text((72, 100), "Internal Rate of Return IRR", fontsize=16)
+        page.insert_text((72, 100), "Critical Reading and Review", fontsize=16)
         pdf_path = tmp_path / "text-based.pdf"
         doc.save(str(pdf_path))
         doc.close()
         text, extract_error = ocr_service.extract_scanned_pdf_with_rapidocr(pdf_path)
         assert extract_error == ""
-        assert "Rate" in text
+        assert "Reading" in text
 
 
 class TestSummarizeOcrPages:
@@ -116,19 +116,19 @@ class TestStudyServiceIntegration:
     """端到端：扫描 PDF 在 study_service 解析链路中被 OCR 接管。"""
 
     DENSE_LINES = [
-        "Engineering Economics Final Examination 2026",
+        "Comprehensive Final Examination 2026",
         "Part I: Multiple Choice Questions (40 points)",
-        "1. The net present value of a project is defined as the sum of",
-        "   all discounted cash flows over the project life period.",
-        "2. The internal rate of return is the discount rate that makes",
-        "   the net present value equal to exactly zero at completion.",
-        "3. When comparing mutually exclusive alternatives with different",
-        "   service lives, the annual worth method should be applied.",
-        "4. Depreciation of fixed assets affects the after-tax cash flow",
-        "   of an investment project in each operating fiscal year.",
-        "Part II: Calculation Problems (60 points)",
-        "5. A company invests 10 million yuan in equipment with a service",
-        "   life of 8 years and salvage value of 0.5 million yuan.",
+        "1. Read each question carefully and identify the main idea",
+        "   before selecting the best answer from the available choices.",
+        "2. Compare the evidence provided in the source material and",
+        "   choose the conclusion that is supported by all stated facts.",
+        "3. When two explanations appear plausible, review their scope",
+        "   and determine which one applies to the given conditions.",
+        "4. Organize the response with a clear claim and supporting details",
+        "   so that every step can be checked against the prompt.",
+        "Part II: Written Response Questions (60 points)",
+        "5. Summarize the passage in your own words and explain how the",
+        "   examples support its central idea in a complete paragraph.",
     ]
 
     def test_dense_scanned_pdf_handled_by_rapidocr(self, tmp_path: Path) -> None:
@@ -160,7 +160,7 @@ class TestStudyServiceIntegration:
         parsed = study_service._extract_material_content(pdf_path)
         assert "RapidOCR" in parsed["parser"]
         assert parsed["parsedCharacters"] > 200
-        assert "Net" in parsed["text"] or "net" in parsed["text"]
+        assert "Question" in parsed["text"] or "question" in parsed["text"]
 
 
 class TestDependenciesOptional:

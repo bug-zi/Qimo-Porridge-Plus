@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
@@ -19,6 +20,7 @@ from .mcp_gateway import seed_mcp_presets
 from .routers import agent as agent_router
 from .routers import auth as auth_router
 from .routers import courses as courses_router
+from .routers import course_feedback as course_feedback_router
 from .routers import external_sources as external_sources_router
 from .routers import glossary as glossary_router
 from .routers import mcp as mcp_router
@@ -27,7 +29,7 @@ from .routers import practice as practice_router
 from .routers import settings as settings_router
 from .routers import strategy as strategy_router
 from .routers import system as system_router
-from .routers.deps import get_connection
+from .routers.deps import get_connection, purge_expired_archive_items
 from .study_service import (
     approve_strategy_documents,
     ensure_orientation_task,
@@ -51,6 +53,14 @@ def _approve_strategy_documents_job(course_id: str, payload: dict[str, Any]) -> 
         str(payload.get("coursePrompt", "")),
         expected_review_plan_version=int(payload.get("reviewPlanVersion", 0)),
         expected_course_prompt_version=int(payload.get("coursePromptVersion", 0)),
+        repair_only=bool(payload.get("repairOnly", False)),
+        generation_mode=str(payload.get("generationMode", "all")),
+        lesson_limit=(int(payload["lessonLimit"]) if payload.get("lessonLimit") is not None else None),
+        continue_generation=bool(payload.get("continueGeneration", False)),
+        # 后台任务已经由持久队列去重；若模拟卷等同课程内容任务尚在
+        # 收尾，应排队等待共享锁，而不是把本次补生成误报为失败。
+        wait_for_generation_lock=True,
+        job_id=str(payload.get("_jobId", "")),
     )
     return {"courseId": course_id, "planned": True}
 
@@ -193,9 +203,24 @@ def initialize_database() -> None:
             )
 
 
+async def _archive_purge_loop() -> None:
+    """服务运行期间定时清理到期归档，避免依赖用户再次打开归档页。"""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            with get_connection() as connection:
+                purge_expired_archive_items(connection)
+        except Exception:
+            # 临时文件占用或数据库忙时留待下一分钟重试，不终止服务。
+            continue
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     initialize_database()
+    # 启动即执行一次到期归档清理；后续访问归档/删除课程时也会惰性清理。
+    with get_connection() as connection:
+        purge_expired_archive_items(connection)
     initialize_auth_database()
     # 阶段2多租户：老库 ALTER 补 owner_id 列，存量无主数据归属首个注册用户
     ensure_owner_columns()
@@ -204,14 +229,25 @@ async def lifespan(_: FastAPI):
     ensure_local_ollama_service()
     initialize_agent_database()
     seed_mcp_presets()
-    try:
-        sync_course_knowledge()
-    except Exception:
-        pass
+    # 按数据库中的实际课程同步知识库，不再隐式选择某个历史默认课程。
+    with get_connection() as connection:
+        course_ids = [str(row["id"]) for row in connection.execute("SELECT id FROM courses").fetchall()]
+    for course_id in course_ids:
+        try:
+            sync_course_knowledge(course_id)
+        except Exception:
+            # 单门课程资料损坏或索引服务不可用不应阻断整个 API 启动。
+            continue
     AGENT_JOB_WORKER.start()
+    archive_purge_task = asyncio.create_task(_archive_purge_loop())
     try:
         yield
     finally:
+        archive_purge_task.cancel()
+        try:
+            await archive_purge_task
+        except asyncio.CancelledError:
+            pass
         AGENT_JOB_WORKER.stop()
 
 
@@ -223,7 +259,12 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+    allow_origins=[
+        "http://127.0.0.1:3500",
+        "http://localhost:3500",
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+    ],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -237,6 +278,7 @@ app.add_middleware(AuthMiddleware)
 app.include_router(system_router.router)
 app.include_router(auth_router.router)
 app.include_router(courses_router.router)
+app.include_router(course_feedback_router.router)
 app.include_router(strategy_router.router)
 app.include_router(materials_router.router)
 app.include_router(practice_router.router)

@@ -28,7 +28,8 @@ from ..agent_runtime import (
     upsert_glossary_term,
 )
 from ..knowledge_service import sample_material_chunks
-from .workflow import JsonModelCall, with_structured_formula_rules
+from .formula_rules import with_structured_formula_rules
+from .workflow_types import JsonModelCall
 
 
 # 候选术语数量边界与批次大小（token 成本控制：候选 >90 条时只撰写 core 档）
@@ -111,7 +112,7 @@ def _scan_prompt() -> str:
 }
 要求：
 1. 数量在 20 到 120 条之间；importance=core 表示考试反复出现或讲义反复讲解的概念，extended 表示出现但低频。
-2. aliases 必须覆盖该术语在本课程中的中文名、英文名、常见缩写、教材符号（例如：净现值 / NPV / Net Present Value）。
+2. aliases 必须覆盖该术语在本课程中的中文名、英文名、常见缩写、教材符号（例如：中文全称 / 英文全称 / 常见缩写 / 教材符号）。
 3. 剔除：通用词汇（如"方法""分析""计算"）、单个字母符号、题干语气词、纯人名地名。
 4. 优先收录会在讲义正文、题干、解析中出现的词——用户悬停查询的对象是这些文本。
 5. 术语之间不得重复或互相包含（若有包含关系，只留更长的那条）。
@@ -288,7 +289,12 @@ def run_glossary_refresh(
             finish_agent_run(run_id, {"skipped": True, "reason": "内容未变化"})
             return {"skipped": True, "termsActive": previous_state.get("termsActive", 0)}
 
-        save_glossary_refresh_state(course_id, status="generating", last_error="")
+        started_at = _now_str()
+        save_glossary_refresh_state(
+            course_id, status="generating", phase="scanning", last_error="",
+            candidates_total=0, terms_completed=0, started_at=started_at,
+            progress_updated_at=started_at,
+        )
         knowledge_points = [
             point for point in workspace.get("knowledgePoints", []) if isinstance(point, dict)
         ]
@@ -358,8 +364,9 @@ def run_glossary_refresh(
 
         if not candidates:
             save_glossary_refresh_state(
-                course_id, status="ready", content_signature=signature,
-                terms_total=0, terms_active=0, last_refreshed_at=_now_str(),
+                course_id, status="ready", phase="ready", content_signature=signature,
+                terms_total=0, terms_active=0, candidates_total=0, terms_completed=0,
+                last_refreshed_at=_now_str(), progress_updated_at=_now_str(),
             )
             finish_agent_run(run_id, {"termsActive": 0, "reason": "无可用候选"})
             return {"termsActive": 0}
@@ -370,6 +377,11 @@ def run_glossary_refresh(
             if core_only:
                 candidates = core_only
         candidates = candidates[:MAX_TERMS_TOTAL]
+        save_glossary_refresh_state(
+            course_id, status="generating", phase="composing",
+            candidates_total=len(candidates), terms_completed=0,
+            progress_updated_at=_now_str(),
+        )
         existing_terms = list_glossary_terms(course_id, include_inactive=True)
         existing_by_key = {
             item["matchKey"]: item for item in existing_terms
@@ -458,6 +470,22 @@ def run_glossary_refresh(
                 except Exception as error:
                     errors.append(f"写入失败：{candidate['term']}：{error}")
 
+            terms_completed = min(batch_start + len(batch), len(candidates))
+            partial_terms = list_glossary_terms(course_id, include_inactive=True)
+            partial_active = len([term for term in partial_terms if term["status"] == "active"])
+            save_glossary_refresh_state(
+                course_id, status="generating", phase="composing",
+                candidates_total=len(candidates), terms_completed=terms_completed,
+                terms_total=len(partial_terms), terms_active=partial_active,
+                last_error="；".join(errors)[:500], progress_updated_at=_now_str(),
+            )
+
+        save_glossary_refresh_state(
+            course_id, status="generating", phase="finalizing",
+            candidates_total=len(candidates), terms_completed=len(candidates),
+            progress_updated_at=_now_str(),
+        )
+
         # 已有 curator 词条不再出现在候选中 → 失活；inactive 且重现 → 已在 upsert 时复活
         stale_keys = [
             item["matchKey"]
@@ -474,11 +502,15 @@ def run_glossary_refresh(
         save_glossary_refresh_state(
             course_id,
             status="ready",
+            phase="ready",
             content_signature=signature,
             terms_total=len(final_terms),
             terms_active=terms_active,
+            candidates_total=len(candidates),
+            terms_completed=len(candidates),
             last_error="；".join(errors)[:500],
             last_refreshed_at=_now_str(),
+            progress_updated_at=_now_str(),
         )
         record_agent_step(
             run_id, 2, "glossary_curator", "completed",
@@ -495,7 +527,15 @@ def run_glossary_refresh(
         finish_agent_run(run_id, result)
         return result
     except Exception as error:
-        save_glossary_refresh_state(course_id, status="failed", last_error=str(error)[:500])
+        current_state = get_glossary_refresh_state(course_id)
+        save_glossary_refresh_state(
+            course_id, status="failed", phase="failed", last_error=str(error)[:500],
+            progress_updated_at=_now_str(),
+            terms_total=len(list_glossary_terms(course_id, include_inactive=True)),
+            terms_active=len(list_glossary_terms(course_id)),
+            candidates_total=current_state.get("candidatesTotal", 0),
+            terms_completed=current_state.get("termsCompleted", 0),
+        )
         fail_agent_run(run_id, error)
         raise
 

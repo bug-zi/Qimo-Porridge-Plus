@@ -16,16 +16,25 @@ import time
 from datetime import date, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+from .course_style_templates import normalize_course_content_style
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 from zipfile import ZipFile
 
-from .agent_runtime import create_adjustment_proposal, enqueue_agent_job
+from .agent_runtime import AgentJobCancelled, create_adjustment_proposal, enqueue_agent_job, is_agent_job_cancelled
 from .agents import ORIENTATION_TASK_ID, build_orientation_guide, run_content_workflow, run_strategy_workflow, with_structured_formula_rules
 from .agents.tools import apply_operations_to_copy
 from .agents.tutor import run_tutor_agent, run_tutor_agent_stream
-from .agents.workflow import _make_orientation_task, _shuffle_single_choice_options, _shuffle_single_choice_questions
+from .agents.orientation import _make_orientation_task
+from .agents.readability_review import build_course_readability_review
+from .agents.question_generation import (
+    _shuffle_single_choice_options,
+    _shuffle_single_choice_questions,
+    mock_questions_need_repair,
+    repair_mock_questions,
+)
 from . import ocr_service
 from . import study_scheduler
 from .knowledge_service import (
@@ -45,10 +54,8 @@ from .knowledge_service import (
 )
 
 
-DEFAULT_COURSE_ID = "engineering-economics"
 DATA_DIRECTORY = Path(__file__).resolve().parent.parent / "data"
 COURSES_DATA_DIRECTORY = DATA_DIRECTORY / "courses"
-LEGACY_WORKSPACE_PATH = DATA_DIRECTORY / "engineering_economics_workspace.json"
 RUNTIME_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 USER_PROFILE_PROMPT_METADATA_KEY = "user_profile_prompt"
 USER_PROFILE_PROMPT_MAX_LENGTH = 4000
@@ -58,8 +65,8 @@ SPREADSHEET_RELATIONSHIP_NAMESPACE = "{http://schemas.openxmlformats.org/officeD
 PACKAGE_RELATIONSHIP_NAMESPACE = "{http://schemas.openxmlformats.org/package/2006/relationships}"
 XLSX_PREVIEW_MAX_ROWS = 60
 XLSX_PREVIEW_MAX_COLUMNS = 16
-MATERIAL_ANALYSIS_VERSION = 4
-WORKSPACE_CONTENT_VERSION = 3
+MATERIAL_ANALYSIS_VERSION = 5
+WORKSPACE_CONTENT_VERSION = 4
 TEXT_SUFFIXES = {"md", "txt"}
 IMAGE_SUFFIXES = {"jpg", "jpeg", "png", "gif", "webp"}
 MARKITDOWN_SUFFIXES = {"pdf", "pptx", "xlsx", "xls", "docx", "doc", "csv", "md", "txt"}
@@ -184,27 +191,27 @@ def _validate_course_id(course_id: str) -> str:
     return normalized
 
 
-def _course_data_directory(course_id: str = DEFAULT_COURSE_ID) -> Path:
+def _course_data_directory(course_id: str) -> Path:
     return COURSES_DATA_DIRECTORY / _validate_course_id(course_id)
 
 
-def _workspace_path(course_id: str = DEFAULT_COURSE_ID) -> Path:
+def _workspace_path(course_id: str) -> Path:
     return _course_data_directory(course_id) / "workspace.json"
 
 
-def _mind_map_path(course_id: str = DEFAULT_COURSE_ID) -> Path:
+def _mind_map_path(course_id: str) -> Path:
     return _course_data_directory(course_id) / "mind_map.json"
 
 
-def _course_material_directory(course_id: str = DEFAULT_COURSE_ID) -> Path:
+def _course_material_directory(course_id: str) -> Path:
     return _course_data_directory(course_id) / "materials"
 
 
-def _course_overview_path(course_id: str = DEFAULT_COURSE_ID) -> Path:
+def _course_overview_path(course_id: str) -> Path:
     return _course_material_directory(course_id) / "课程复习总览.md"
 
 
-def _strategy_directory(course_id: str = DEFAULT_COURSE_ID) -> Path:
+def _strategy_directory(course_id: str) -> Path:
     return _course_data_directory(course_id) / "strategy"
 
 
@@ -768,7 +775,7 @@ def _extract_pptx_excerpt(file_path: Path) -> tuple[int, str]:
         return 0, ""
 
 
-def resolve_course_material_path(relative_path: str, course_id: str = DEFAULT_COURSE_ID) -> Path:
+def resolve_course_material_path(relative_path: str, course_id: str) -> Path:
     if "\\" in relative_path or ":" in relative_path:
         raise FileNotFoundError("资料路径无效")
 
@@ -882,8 +889,55 @@ def _extract_xlsx_preview(file_path: Path) -> list[dict[str, Any]]:
         return preview_sheets
 
 
-def _relative_material_path(file_path: Path, course_id: str = DEFAULT_COURSE_ID) -> str:
+def _relative_material_path(file_path: Path, course_id: str) -> str:
     return str(file_path.relative_to(_course_material_directory(course_id))).replace("\\", "/")
+
+
+MATERIAL_ROLE_PRIMARY = "primary"
+MATERIAL_ROLE_SUPPLEMENTARY = "supplementary"
+MATERIAL_ROLE_VALUES = {MATERIAL_ROLE_PRIMARY, MATERIAL_ROLE_SUPPLEMENTARY}
+
+
+def _normalize_material_role(value: Any) -> str:
+    role = str(value or MATERIAL_ROLE_SUPPLEMENTARY).strip().lower()
+    return role if role in MATERIAL_ROLE_VALUES else MATERIAL_ROLE_SUPPLEMENTARY
+
+
+def _material_role_metadata(workspace: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    raw = workspace.get("materialRoles")
+    if not isinstance(raw, dict):
+        return {}
+    normalized: dict[str, dict[str, Any]] = {}
+    for path, config in raw.items():
+        if not isinstance(config, dict):
+            continue
+        role = _normalize_material_role(config.get("role"))
+        try:
+            priority_order = int(config.get("priorityOrder") or 0)
+        except (TypeError, ValueError):
+            priority_order = 0
+        normalized[str(path)] = {"role": role, "priorityOrder": max(0, priority_order)}
+    return normalized
+
+
+def _apply_material_roles(materials: list[dict[str, Any]], workspace: dict[str, Any]) -> None:
+    roles = _material_role_metadata(workspace)
+    for index, material in enumerate(materials, start=1):
+        relative_path = str(material.get("relativePath", ""))
+        config = roles.get(relative_path, {})
+        role = _normalize_material_role(config.get("role"))
+        priority_order = int(config.get("priorityOrder") or 0) or index
+        material["role"] = role
+        material["isPrimary"] = role == MATERIAL_ROLE_PRIMARY
+        material["priorityOrder"] = priority_order
+    workspace["materialRoles"] = {
+        str(material.get("relativePath")): {
+            "role": str(material.get("role") or MATERIAL_ROLE_SUPPLEMENTARY),
+            "priorityOrder": int(material.get("priorityOrder") or 0),
+        }
+        for material in materials
+        if isinstance(material, dict) and material.get("relativePath")
+    }
 
 
 def _material_cache_key(file_path: Path) -> str:
@@ -1019,7 +1073,7 @@ def _convert_file_to_pdf(file_path: Path) -> dict[str, Any]:
         }
 
 
-def resolve_converted_material_pdf_path(relative_path: str, course_id: str = DEFAULT_COURSE_ID) -> Path:
+def resolve_converted_material_pdf_path(relative_path: str, course_id: str) -> Path:
     file_path = resolve_course_material_path(relative_path, course_id)
     conversion = _convert_file_to_pdf(file_path)
     if not conversion.get("available") or not conversion.get("path"):
@@ -1266,11 +1320,29 @@ def _extract_material_content(file_path: Path, *, force_reparse: bool = False) -
             text = excerpt
             parser = f"内置 PPTX 文本读取（{slide_count} 页）"
 
-    # 扫描版 PDF 兜底：文本层提取为空时，走 RapidOCR 本地识别，
-    # 仍不足再对薄弱页升级视觉模型（见 _ocr_fallback_for_scanned_pdf）。
-    if suffix == "pdf" and not _normalize_extracted_text(text):
-        text, parser, ocr_errors = _ocr_fallback_for_scanned_pdf(file_path)
-        errors.extend(ocr_errors)
+    # 扫描版 PDF 兜底不能只判断“完全为空”：很多扫描教材只有水印或极少量
+    # OCR 文本层，MarkItDown 会返回几十个字符并被误判为解析成功。按页数评估
+    # 文本密度，明显过薄时对整份 PDF 做本地 OCR，并保留内容更完整的结果。
+    if suffix == "pdf":
+        normalized_pdf_text = _normalize_extracted_text(text)
+        page_count = 1
+        try:
+            pymupdf, _ = ocr_service._get_pymupdf()
+            if pymupdf is not None:
+                pdf_document = pymupdf.open(str(file_path))
+                try:
+                    page_count = max(1, int(pdf_document.page_count))
+                finally:
+                    pdf_document.close()
+        except Exception as error:
+            errors.append(f"PDF 页数检测失败：{error}")
+        minimum_expected = max(ocr_service.OCR_MIN_CHARS_PER_PAGE, page_count * 40)
+        if len(normalized_pdf_text) < minimum_expected:
+            ocr_text, ocr_parser, ocr_errors = _ocr_fallback_for_scanned_pdf(file_path)
+            normalized_ocr_text = _normalize_extracted_text(ocr_text)
+            if len(normalized_ocr_text) > len(normalized_pdf_text):
+                text, parser = normalized_ocr_text, ocr_parser
+            errors.extend(ocr_errors)
 
     parsed = {
         "parser": parser,
@@ -1400,7 +1472,7 @@ def analyze_course_material(file_path: Path, *, force_reparse: bool = False) -> 
     }
 
 
-def build_material_preview(relative_path: str, course_id: str = DEFAULT_COURSE_ID) -> dict[str, Any]:
+def build_material_preview(relative_path: str, course_id: str) -> dict[str, Any]:
     file_path = resolve_course_material_path(relative_path, course_id)
     suffix = file_path.suffix.lower().lstrip(".")
     analysis = analyze_course_material(file_path)
@@ -1483,9 +1555,10 @@ def build_material_preview(relative_path: str, course_id: str = DEFAULT_COURSE_I
 
 
 def scan_course_materials(
-    course_id: str = DEFAULT_COURSE_ID,
+    course_id: str,
     *,
     force_reparse: bool = False,
+    workspace: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     course_directory = _course_material_directory(course_id)
     if not course_directory.exists():
@@ -1505,6 +1578,8 @@ def scan_course_materials(
         }
         material.update(analyze_course_material(file_path, force_reparse=force_reparse))
         materials.append(material)
+    if workspace is not None:
+        _apply_material_roles(materials, workspace)
     return materials
 
 
@@ -1515,6 +1590,8 @@ def _material_digest(materials: list[dict[str, Any]]) -> str:
             "size": item.get("size", 0),
             "aiStatus": item.get("aiStatus", ""),
             "analysisVersion": item.get("analysisVersion", 0),
+            "role": item.get("role", MATERIAL_ROLE_SUPPLEMENTARY),
+            "priorityOrder": item.get("priorityOrder", 0),
         }
         for item in materials
     ]
@@ -1530,6 +1607,8 @@ def _build_material_memory(
 ) -> dict[str, Any]:
     digest = _material_digest(materials)
     readable = [item for item in materials if item.get("aiReadable")]
+    primary = [item for item in materials if item.get("role") == MATERIAL_ROLE_PRIMARY]
+    supplementary = [item for item in materials if item.get("role") != MATERIAL_ROLE_PRIMARY]
     partial = [item for item in materials if item.get("aiStatus") == "partial"]
     unreadable = [item for item in materials if item.get("aiStatus") == "unreadable"]
     skipped = [item for item in materials if item.get("aiStatus") == "skipped"]
@@ -1541,11 +1620,15 @@ def _build_material_memory(
         "aiPartialCount": len(partial),
         "aiSkippedCount": len(skipped),
         "aiUnreadableCount": len(unreadable),
+        "primaryCount": len(primary),
+        "supplementaryCount": len(supplementary),
+        "primaryMaterials": [str(item.get("relativePath") or item.get("name")) for item in primary],
         "lastChange": change_note or "资料库已重新解析",
         "lastSyncedAt": datetime.now().isoformat(timespec="seconds"),
         "contentRefreshRecommended": changed,
         "summary": (
             f"当前资料库共 {len(materials)} 份资料，"
+            f"其中 {len(primary)} 份主资料、{len(supplementary)} 份辅资料；"
             f"{len(readable)} 份可进入 AI 上下文，"
             f"{len(partial)} 份部分解析，{len(unreadable)} 份未解析。"
         ),
@@ -1558,6 +1641,7 @@ def _mark_material_memory(
     *,
     change_note: str | None = None,
 ) -> None:
+    _apply_material_roles(materials, workspace)
     previous_digest = str(workspace.get("materialMemory", {}).get("digest", ""))
     material_memory = _build_material_memory(
         materials,
@@ -1575,11 +1659,12 @@ def _mark_material_memory(
 
 
 def sync_course_knowledge(
-    course_id: str = DEFAULT_COURSE_ID,
+    course_id: str,
     workspace: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     should_save_workspace = workspace is None
     current_workspace = workspace or load_workspace(course_id, refresh_materials=False)
+    _apply_material_roles(current_workspace.get("materials", []), current_workspace)
     documents: list[dict[str, str]] = []
     for material in current_workspace.get("materials", []):
         if not isinstance(material, dict):
@@ -1598,6 +1683,8 @@ def sync_course_knowledge(
                 "relativePath": relative_path,
                 "name": str(material.get("name") or Path(relative_path).name),
                 "text": text,
+                "role": str(material.get("role") or MATERIAL_ROLE_SUPPLEMENTARY),
+                "priorityOrder": int(material.get("priorityOrder") or 0),
             }
         )
 
@@ -1621,7 +1708,7 @@ def _safe_upload_material_name(filename: str) -> str:
     return normalized
 
 
-def upload_course_material(filename: str, content: bytes, course_id: str = DEFAULT_COURSE_ID) -> dict[str, Any]:
+def upload_course_material(filename: str, content: bytes, course_id: str) -> dict[str, Any]:
     safe_name = _safe_upload_material_name(filename)
     if not content:
         raise ValueError("不能导入空文件")
@@ -1644,7 +1731,9 @@ def upload_course_material(filename: str, content: bytes, course_id: str = DEFAU
 
 def upload_course_materials(
     files: list[tuple[str, bytes]],
-    course_id: str = DEFAULT_COURSE_ID,
+    course_id: str,
+    *,
+    role: str = MATERIAL_ROLE_SUPPLEMENTARY,
 ) -> dict[str, Any]:
     if not files:
         raise ValueError("没有可导入的资料文件")
@@ -1673,22 +1762,36 @@ def upload_course_materials(
         target_path.write_bytes(content)
         saved_names.append(target_path.name)
 
+    normalized_role = _normalize_material_role(role)
+    workspace = load_workspace(course_id, refresh_materials=False)
+    roles = _material_role_metadata(workspace)
+    for index, saved_name in enumerate(saved_names, start=1):
+        roles[saved_name] = {"role": normalized_role, "priorityOrder": len(roles) + index}
+    workspace["materialRoles"] = roles
     preview_names = "、".join(saved_names[:3])
     suffix = "等" if len(saved_names) > 3 else ""
-    return refresh_workspace_materials(
-        course_id,
-        change_note=f"批量导入资料：{preview_names}{suffix}，共 {len(saved_names)} 份",
+    role_label = "主资料" if normalized_role == MATERIAL_ROLE_PRIMARY else "辅资料"
+    _mark_material_memory(
+        workspace,
+        scan_course_materials(course_id, workspace=workspace),
+        change_note=f"批量导入{role_label}：{preview_names}{suffix}，共 {len(saved_names)} 份",
     )
+    try:
+        sync_course_knowledge(course_id, workspace)
+    except Exception as error:
+        workspace["knowledgeBase"] = {"status": "unavailable", "message": f"知识库索引更新失败：{error}"}
+    save_workspace(workspace, course_id)
+    return workspace
 
 
-def delete_course_material(relative_path: str, course_id: str = DEFAULT_COURSE_ID) -> dict[str, Any]:
+def delete_course_material(relative_path: str, course_id: str) -> dict[str, Any]:
     file_path = resolve_course_material_path(relative_path, course_id)
     deleted_name = _relative_material_path(file_path, course_id)
     file_path.unlink()
     return refresh_workspace_materials(course_id, change_note=f"删除资料：{deleted_name}")
 
 
-def _source_context(materials: list[dict[str, Any]], course_id: str = DEFAULT_COURSE_ID) -> str:
+def _source_context(materials: list[dict[str, Any]], course_id: str) -> str:
     overview_path = _course_overview_path(course_id)
     overview = (
         overview_path.read_text(encoding="utf-8")
@@ -1721,463 +1824,6 @@ def _source_context(materials: list[dict[str, Any]], course_id: str = DEFAULT_CO
     )
 
 
-def _default_study_guides() -> dict[str, dict[str, Any]]:
-    return {
-        "time-value": {
-            "objectives": [
-                "会先画现金流量图，标清大小、流向、发生时点，再决定折到 P、F 还是 A。",
-                "能区分一次支付、普通年金、即付年金、递延年金、永续年金，避免把时间点看错。",
-                "能按“括号左边是要求量，右边是已知量”选 P/F、F/P、P/A、A/P、F/A、A/F。",
-                "能处理名义利率、周期利率和实际年利率换算。",
-            ],
-            "sourceHighlights": [
-                "第4章课件把现金流量图作为资金等值计算的起点，强调现金流大小、方向和时间点。",
-                "复习总览将一次支付、年金、名义/实际利率列为首日核心内容。",
-                "真题第一面已出现名义利率与实际利率、永续基金、普通年金终值、一次支付现值/终值。",
-            ],
-            "concepts": [
-                {
-                    "title": "同一时点原则",
-                    "body": "不同年份的钱不能直接相加，必须按利率或基准收益率折算到同一时点。问“现在值多少”折到第0期，问“若干年后有多少”折到目标期末。",
-                    "formula": "F = P(F/P, i, n)；P = F(P/F, i, n)",
-                    "source": "第4章资金的时间价值",
-                },
-                {
-                    "title": "年金类型判别",
-                    "body": "期末等额发生是普通年金；期初等额发生是即付年金；延迟若干期后才连续发生是递延年金；无限期等额发生是永续年金。",
-                    "formula": "普通年金 P = A(P/A, i, n)；永续年金 P = A/i",
-                    "source": "第4章年金等值计算",
-                },
-                {
-                    "title": "递延年金",
-                    "body": "先把连续年金折到第一笔现金流发生前一期，再继续折回第0期。递延期和年金期数不要混在一起。",
-                    "formula": "P₀ = A(P/A, i, n)(P/F, i, m)",
-                    "source": "资金时间价值课件",
-                },
-                {
-                    "title": "名义利率与实际利率",
-                    "body": "名义利率 r 固定时，年内计息次数 m 越多，实际年利率越高；计息周期为一年时，名义利率才等于实际利率。",
-                    "formula": "i实际 = (1 + r/m)^m - 1",
-                    "source": "真题第一面与第4章课件",
-                },
-                {
-                    "title": "不等额现金流",
-                    "body": "现金流每年不相等时，不要强行套年金系数，应逐年用 P/F 折现后相加。",
-                    "formula": "P = CF₁(P/F,i,1) + CF₂(P/F,i,2) + ...",
-                    "source": "第4章资金等值计算",
-                },
-            ],
-            "example": {
-                "title": "普通年金与即付年金对照",
-                "setup": "每年存入10万元，连续5年，年利率10%。若为每年年末存，求第5年末本利和；若为每年年初存，应如何调整？",
-                "steps": [
-                    "年末存款是普通年金终值，F = A(F/A, 10%, 5)。",
-                    "(F/A, 10%, 5) = [(1+10%)⁵ - 1] / 10% = 6.1051。",
-                    "普通年金终值 F = 10 × 6.1051 = 61.051 万元。",
-                    "年初存款每笔都比年末存多计息一期，所以在普通年金结果上乘 (1+10%)。",
-                    "即付年金终值 F = 61.051 × 1.1 = 67.156 万元。",
-                ],
-                "conclusion": "资金时间价值题的关键不是死背公式，而是先把现金流发生在期初还是期末判断清楚。",
-            },
-            "checklist": [
-                "题干写“每年年末”：优先按普通年金。",
-                "题干写“每年年初”：按即付年金，多一个计息期。",
-                "题干写“永久”“永续”：用 P=A/i 或 A=P×i。",
-                "给名义利率且一年多次计息：先换周期利率或实际利率。",
-                "现金流不等额：逐年折现，不套 P/A。",
-            ],
-        },
-        "cash-flow-tax": {
-            "objectives": [
-                "能区分净利润和现金流量，知道工程经济评价用现金流而不是只看利润。",
-                "会计算直线法、工作量法、双倍余额递减法、年数总和法的折旧口径。",
-                "能由收入、付现成本、折旧、所得税推导税后经营净现金流。",
-                "最后一年能补上残值、营运资金回收和可能的残值处置税影响。",
-            ],
-            "sourceHighlights": [
-                "第2章和第5章课件都强调现金流量比会计利润更适合项目评价。",
-                "复习总览把折旧、所得税、NCF、最后一年残值回收列为高频考点。",
-                "真题第一面已出现“最后一年税后现金流量”题型，常见失分点是漏回收项。",
-            ],
-            "concepts": [
-                {
-                    "title": "现金流量优先",
-                    "body": "净利润会受到折旧、摊销等会计处理影响；现金流量更能反映项目是否真实回收投资和创造价值。",
-                    "source": "工程经济评价基本要素",
-                },
-                {
-                    "title": "折旧税盾",
-                    "body": "折旧不是付现成本，但会降低应纳税所得额，从而减少所得税。算现金流时先扣折旧算税，再把折旧加回来。",
-                    "formula": "所得税 = (收入 - 付现成本 - 折旧) × 税率",
-                    "source": "第5章税后现金流",
-                },
-                {
-                    "title": "经营净现金流",
-                    "body": "若题目给收入、付现成本、折旧和税率，最稳写法是先算税前利润、所得税、税后利润，再用税后利润加折旧。",
-                    "formula": "NCF = 收入 - 付现成本 - 所得税 = 税后利润 + 折旧",
-                    "source": "第5章现金流量表",
-                },
-                {
-                    "title": "折旧方法",
-                    "body": "平均年限法每年相同；工作量法按实际工作量分摊；双倍余额递减法和年数总和法前期折旧较多，提前形成税盾。",
-                    "formula": "平均年限法折旧 = (原值 - 净残值) / 年限",
-                    "source": "复习总览折旧方法",
-                },
-                {
-                    "title": "最后一年口径",
-                    "body": "最后一年通常等于经营 NCF 加残值回收、营运资金回收。若残值收入与账面净值不同，还要考虑清理损益的所得税影响。",
-                    "formula": "最后一年 NCF = 经营 NCF + 残值收入 + 营运资金回收",
-                    "source": "真题第一面税后现金流题",
-                },
-            ],
-            "example": {
-                "title": "最后一年税后现金流",
-                "setup": "设备购置及安装100万元，寿命10年，残值10万元，直线折旧；年收入50万元，年付现成本25万元，所得税率33%；另有营运资金15万元期末收回。",
-                "steps": [
-                    "年折旧 = (100 - 10) / 10 = 9 万元。",
-                    "税前利润 = 50 - 25 - 9 = 16 万元。",
-                    "所得税 = 16 × 33% = 5.28 万元。",
-                    "经营净现金流 = 50 - 25 - 5.28 = 19.72 万元。",
-                    "最后一年现金流 = 19.72 + 残值10 + 营运资金回收15 = 44.72 万元。",
-                ],
-                "conclusion": "税后现金流题先算经营期 NCF，最后一年再检查残值和营运资金，不能把回收项漏掉。",
-            },
-            "checklist": [
-                "折旧不是现金流出，但影响所得税。",
-                "先算税前利润，再算所得税，最后回到经营净现金流。",
-                "第0期投资和营运资金投入是现金流出。",
-                "最后一年检查残值、营运资金回收和清理税影响。",
-                "加速折旧不改变总折旧额，只改变各年税盾发生时间。",
-            ],
-        },
-        "project-evaluation": {
-            "objectives": [
-                "能区分静态指标和动态指标，知道动态评价更适合正式决策。",
-                "能计算静态/动态投资回收期，并说明回收期指标的局限。",
-                "会用 NPV、NAV、NPVR、IRR 判断单一项目是否可行。",
-                "会处理 Excel NPV、PMT、IRR 的第0期和现金流符号易错点。",
-            ],
-            "sourceHighlights": [
-                "第5章课件将评价方法分为不考虑资金时间价值的静态指标和考虑复利折现的动态指标。",
-                "第5章 Excel 实践课件给出 NPV、NAV、IRR、PMT 的函数口径。",
-                "复习总览将动态回收期、NPV第0期处理、IRR插值列为综合模拟高频陷阱。",
-            ],
-            "concepts": [
-                {
-                    "title": "静态回收期",
-                    "body": "不折现，直接累计净现金流到首次转正。优点是直观，缺点是不考虑资金时间价值，也不考虑回收期后的收益。",
-                    "formula": "Pt = 首次转正前一年 + 上年累计未回收额 / 当年净现金流",
-                    "source": "第5章投资回收期",
-                },
-                {
-                    "title": "动态回收期",
-                    "body": "先把各年净现金流按基准收益率折现，再累计到累计现值首次转正。它通常比静态回收期更长。",
-                    "formula": "Pt' = 首次转正前一年 + 上年累计未回收现值 / 当年折现净现金流",
-                    "source": "第5章动态投资回收期",
-                },
-                {
-                    "title": "NPV 与 NAV",
-                    "body": "NPV 把全寿命现金流折到第0期，判断是否超过基准收益率；NAV 把 NPV 转为等额年值，寿命不等方案比较时很常用。",
-                    "formula": "NPV = 各期净现金流现值之和；NAV = NPV(A/P, i, n)",
-                    "source": "第5章净现值和净年值",
-                },
-                {
-                    "title": "IRR 判别",
-                    "body": "IRR 是使 NPV 等于0的折现率。常规投资项目中，IRR ≥ 基准收益率则可接受；非常规现金流可能出现多个 IRR。",
-                    "formula": "IRR = i₁ + NPV₁ / (NPV₁ - NPV₂) × (i₂ - i₁)",
-                    "source": "第5章内部收益率",
-                },
-                {
-                    "title": "Excel 净现值口径",
-                    "body": "Excel 的 NPV(rate, value1, value2...) 默认 value1 是第1期末现金流，不包含第0期初始投资。",
-                    "formula": "=第0期现金流 + NPV(rate, 第1期现金流, ..., 第n期现金流)",
-                    "source": "第5章 Excel 实践",
-                },
-            ],
-            "example": {
-                "title": "NPV 与 Excel 第0期",
-                "setup": "某项目第0期投资206000元，第1至6年年末现金流为50000、50000、50000、50000、48000、106000元，贴现率12%。",
-                "steps": [
-                    "第0期现金流是 -206000，不能放进 Excel 的 NPV 函数内部。",
-                    "第1至6年现金流发生在各年年末，可放入 NPV(12%, 50000, 50000, 50000, 50000, 48000, 106000)。",
-                    "完整表达式为 =-206000 + NPV(12%, 50000, 50000, 50000, 50000, 48000, 106000)。",
-                    "课件示例结果约为 26806.86 元，NPV > 0。",
-                    "结论是该项目在12%基准收益率下仍有超额收益。",
-                ],
-                "conclusion": "第5章经常把指标含义和 Excel 函数口径一起考，先处理第0期，再判别 NPV 正负。",
-            },
-            "checklist": [
-                "问回收速度：回收期；问是否创造超额收益：NPV。",
-                "动态回收期必须先折现后累计。",
-                "NPV > 0 可行，NPV = 0 刚好达到基准收益率，NPV < 0 不可行。",
-                "IRR 插值必须找一正一负两个 NPV。",
-                "Excel NPV 不含第0期；Excel IRR 序列要包含第0期并保留正负号。",
-            ],
-        },
-        "alternatives": {
-            "objectives": [
-                "能先判断方案关系：互斥、独立还是混合。",
-                "能按寿命相同/不同、收益型/费用型选择 NPV、NAV、PC、AC 或差额分析。",
-                "会用差额净现值判断追加投资是否值得。",
-                "能处理独立方案资金约束和无限寿命方案中的周期性费用。",
-            ],
-            "sourceHighlights": [
-                "第6章课件覆盖互斥方案、寿命相同/不同方案、独立方案、混合方案和无限寿命方案。",
-                "复习总览多次强调寿命不同方案优先转年值，费用型方案比较 PC 或 AC。",
-                "综合模拟错疑点记录了无限寿命方案周期性大修费用按 A/F 折成年值。",
-            ],
-            "concepts": [
-                {
-                    "title": "关系优先",
-                    "body": "互斥方案只能选一个；独立方案可以多个都选；混合方案通常组内互斥、组间独立。关系判断错，后面指标再准也会选错。",
-                    "source": "第6章多方案经济评价",
-                },
-                {
-                    "title": "寿命相同互斥方案",
-                    "body": "收益型互斥方案寿命相同时可比较 NPV，也可做差额分析。不能简单选 IRR 最大，因为 IRR 可能偏向投资额小的方案。",
-                    "formula": "ΔNPV = NPV投资大方案 - NPV投资小方案；ΔNPV ≥ 0 选投资大方案",
-                    "source": "第6章差额净现值法",
-                },
-                {
-                    "title": "寿命不同方案",
-                    "body": "直接比较 NPV 会受寿命长短影响。考试速成优先记年值法：收益型比 NAV，费用型比 AC。",
-                    "formula": "NAV = NPV(A/P, i, n)；AC = PC(A/P, i, n)",
-                    "source": "第6章寿命期不同方案",
-                },
-                {
-                    "title": "费用型方案",
-                    "body": "如果各方案产出价值相同或效益难以估算，只比较费用。费用现值 PC 或费用年值 AC 越小越好。",
-                    "source": "第6章费用现值与费用年值",
-                },
-                {
-                    "title": "独立方案资金约束",
-                    "body": "无资金限制时，NPV > 0 的独立方案原则上都可选；有资金限制时，最稳是列出所有不超预算的组合，选总 NPV 最大。",
-                    "source": "第6章独立方案和混合方案",
-                },
-                {
-                    "title": "无限寿命与周期费用",
-                    "body": "无限寿命方案可把现值转为年值。每隔 N 年发生一次大修费 F，本质是已知终值求年值，用 A/F。",
-                    "formula": "无限寿命 AC = PC × i；周期大修年值 A = F(A/F, i, N)",
-                    "source": "第6章无限寿命方案",
-                },
-            ],
-            "example": {
-                "title": "差额净现值判断追加投资",
-                "setup": "A、B 两个收益型互斥方案寿命相同。A 初始投资100万元，NPV为28万元；B 初始投资150万元，NPV为38万元。问是否值得选择投资更大的 B。",
-                "steps": [
-                    "先确认关系：A、B 互斥，只能选一个。",
-                    "确认寿命相同且收益型，可以直接比较 NPV，也可以看追加投资是否值得。",
-                    "ΔNPV = NPV_B - NPV_A = 38 - 28 = 10 万元。",
-                    "ΔNPV ≥ 0，说明 B 相对 A 多投的50万元能带来正的增量净现值。",
-                    "结论：选投资较大的 B。",
-                ],
-                "conclusion": "差额分析的本质是判断“多花的钱值不值”，不是只看投资小或 IRR 高。",
-            },
-            "checklist": [
-                "第一步写方案关系：互斥、独立、混合。",
-                "寿命相同收益型互斥：NPV 大或 ΔNPV ≥ 0 的方案。",
-                "寿命不同收益型互斥：转 NAV 比较。",
-                "费用型方案：PC 或 AC 越小越好。",
-                "独立方案有预算：列合法组合，选总 NPV 最大。",
-                "每隔 N 年发生一次费用 F：折成年值用 A/F。",
-            ],
-        },
-        "uncertainty": {
-            "objectives": [
-                "能写出盈亏平衡产量、生产能力利用率、保本价格、保本单位变动成本。",
-                "能区分不含税与含营业税及附加的盈亏平衡口径。",
-                "能用安全余量和盈亏平衡点高低判断项目抗风险能力。",
-                "能解释敏感性分析、临界变化率、概率期望值的含义。",
-            ],
-            "sourceHighlights": [
-                "第7章课件覆盖盈亏平衡分析、敏感性分析、概率分析与期望值。",
-                "复习总览记录了含税口径、生产能力利用率、保本价格和保本单位变动成本。",
-                "诊断信息把盈亏平衡公式口径列为当前提分点。",
-            ],
-            "concepts": [
-                {
-                    "title": "盈亏平衡产量",
-                    "body": "不考虑营业税及附加时，固定成本除以单位边际贡献就是保本产量。单位边际贡献越大，保本产量越低。",
-                    "formula": "Q* = F / (P - Cv)",
-                    "source": "第7章盈亏平衡分析",
-                },
-                {
-                    "title": "含税口径",
-                    "body": "若题目给营业税及附加率 r，销售单价要按 P(1-r) 进入边际贡献。含税与不含税口径是常见陷阱。",
-                    "formula": "Q* = F / [P(1-r) - Cv]",
-                    "source": "第7章含税盈亏平衡",
-                },
-                {
-                    "title": "生产能力利用率",
-                    "body": "保本产量占设计产能比例越低，说明项目达到不亏损所需产能越少，抗风险能力越强。",
-                    "formula": "q* = Q* / Qc",
-                    "source": "第7章生产能力利用率",
-                },
-                {
-                    "title": "保本价格与变动成本",
-                    "body": "保本价格是刚好不亏时的最低售价；保本单位变动成本是刚好不亏时可承受的最高单位变动成本。",
-                    "formula": "P* = F/Qc + Cv；Cv* = P - F/Qc",
-                    "source": "第7章保本指标",
-                },
-                {
-                    "title": "敏感性分析",
-                    "body": "每次只改变一个关键变量，看 NPV、利润等指标变化幅度。指标变化越大，或临界变化率绝对值越小，该因素越敏感。",
-                    "formula": "临界变化率越接近 0，风险越大",
-                    "source": "第7章敏感性分析",
-                },
-                {
-                    "title": "概率分析",
-                    "body": "概率分析把不同情景结果按概率加权，常用期望值辅助判断，但不能忽略极端情景风险。",
-                    "formula": "E = Σ(情景结果 × 对应概率)",
-                    "source": "第7章概率分析",
-                },
-            ],
-            "example": {
-                "title": "保本产量与风险判断",
-                "setup": "固定成本120万元，产品单价800元，单位变动成本500元，年设计产能8000件。",
-                "steps": [
-                    "单位边际贡献 = 800 - 500 = 300 元。",
-                    "盈亏平衡产量 Q* = 1200000 / 300 = 4000 件。",
-                    "生产能力利用率 = 4000 / 8000 = 50%。",
-                    "如果同类项目的保本利用率是70%，本项目达到保本所需产能更低。",
-                    "因此本项目安全余量更大，抗销量下降风险更强。",
-                ],
-                "conclusion": "盈亏平衡点越低，项目越容易越过不亏线，抗风险能力越强。",
-            },
-            "checklist": [
-                "没有税率：用 Q*=F/(P-Cv)。",
-                "有营业税及附加率：分母改为 P(1-r)-Cv。",
-                "盈亏平衡点越低，抗风险能力越强。",
-                "临界变化率绝对值越小，因素越敏感。",
-                "概率分析用期望值，敏感性分析不直接给发生概率。",
-            ],
-        },
-        "excel": {
-            "objectives": [
-                "能判断 PV、FV、PMT、NPV、IRR、NPER 分别对应什么经济含义。",
-                "能准确处理 NPV 不含第0期、IRR 包含第0期现金流序列。",
-                "能用 PMT 的 rate、nper、pv、fv、type 参数解释年值换算。",
-                "能区分单变量求解和规划求解器的使用场景。",
-            ],
-            "sourceHighlights": [
-                "Excel 操作基础课件强调公式以 = 开头、相对/绝对引用、常用函数和数据运算。",
-                "第5章 Excel 实践课件给出 NPV 函数曲线、PMT 年值计算、IRR 插值和函数求解。",
-                "单变量求解适合让某公式达到目标值，规划求解器适合有目标、变量和约束的优化。",
-            ],
-            "concepts": [
-                {
-                    "title": "基础输入规则",
-                    "body": "Excel 公式必须以 = 开头。复制公式时相对引用会变化，绝对引用用 $ 固定行列。",
-                    "formula": "$A$1 固定行列；$A1 固定列；A$1 固定行",
-                    "source": "Excel 操作基础概述",
-                },
-                {
-                    "title": "资金等值函数",
-                    "body": "PV 求现值，FV 求终值，PMT 求等额年金，NPER 求期数。rate 和 nper 的单位必须一致。",
-                    "formula": "PMT(rate, nper, pv, fv, type)",
-                    "source": "第5章 Excel 实践",
-                },
-                {
-                    "title": "PMT 符号与 type",
-                    "body": "PMT 返回值通常与现值符号相反；type 为 1 表示期初付款，不填或 0 表示期末付款。",
-                    "source": "第5章 Excel 实践净年值",
-                },
-                {
-                    "title": "NPV 第0期",
-                    "body": "NPV 函数从第1期末开始折现，因此第0期初始投资要单独加在函数外。",
-                    "formula": "=第0期现金流 + NPV(rate, 第1期现金流, ..., 第n期现金流)",
-                    "source": "第5章 Excel 实践 NPV",
-                },
-                {
-                    "title": "IRR 序列",
-                    "body": "IRR 的现金流序列第一个值就是第0期，且通常至少要有一正一负。",
-                    "formula": "=IRR(第0期现金流:最后一期现金流)",
-                    "source": "第5章 Excel 实践 IRR",
-                },
-                {
-                    "title": "求解工具",
-                    "body": "单变量求解用于反推一个变量使公式达到指定值；规划求解器用于在约束条件下最大化、最小化或达到目标。",
-                    "source": "单变量求解、规划求解器课件",
-                },
-            ],
-            "example": {
-                "title": "PMT 与 NPV 的两个高频口径",
-                "setup": "以10%年利率借款20000元，寿命10年，问每年至少收回多少；另有第0期投资-100，后4年每年现金流35，折现率10%，求 NPV 写法。",
-                "steps": [
-                    "年金反推用 PMT：=PMT(10%, 10, -20000)，课件示例结果约为 3254.91 元。",
-                    "PMT 中 pv 写成 -20000，是为了让返回的每年收回金额为正。",
-                    "NPV 写法为 =-100 + NPV(10%, 35, 35, 35, 35)。",
-                    "不要写成 =NPV(10%, -100, 35, 35, 35, 35)，否则第0期投资被当作第1期末现金流折现。",
-                    "IRR 则需要把第0期放入序列：=IRR(-100, 35, 35, 35, 35)。",
-                ],
-                "conclusion": "Excel 题的关键不是背函数名，而是确认第0期和现金流方向是否处理正确。",
-            },
-            "checklist": [
-                "rate 与 nper 单位一致。",
-                "NPV 不含第0期现金流，第0期单独加。",
-                "IRR 现金流序列包含第0期，并保留正负号。",
-                "PMT 结果符号与 pv 常相反。",
-                "单变量求解是一个可变单元格，规划求解器是目标、变量、约束组合。",
-            ],
-        },
-    }
-
-
-def _text_has_any(text: str, keywords: list[str]) -> bool:
-    return any(keyword in text for keyword in keywords)
-
-
-def _study_topic_for_task(task: dict[str, Any]) -> str:
-    text = " ".join(
-        str(value)
-        for value in (
-            task.get("knowledgePointId", ""),
-            task.get("title", ""),
-            task.get("description", ""),
-            task.get("prompt", ""),
-            task.get("explanation", ""),
-            task.get("source", ""),
-        )
-    ).lower()
-    if _text_has_any(text, ["excel", "pmt", "irr", "npv函数", "单变量求解", "规划求解器"]):
-        return "excel"
-    if _text_has_any(text, ["税后", "折旧", "所得税", "付现成本", "经营净现金流", "ncf", "cash-flow", "tax"]):
-        return "cash-flow-tax"
-    if _text_has_any(text, ["多方案", "互斥", "独立方案", "混合方案", "寿命不同", "费用年值", "multi"]):
-        return "alternatives"
-    if _text_has_any(text, ["盈亏平衡", "敏感性", "不确定性", "保本", "risk", "bep"]):
-        return "uncertainty"
-    if _text_has_any(text, ["资金时间", "年金", "p/f", "f/p", "p/a", "a/p", "fund-time-value", "time-value", "名义利率"]):
-        return "time-value"
-    if _text_has_any(text, ["回收期", "npv", "nav", "npvr", "irr", "评价", "evaluation"]):
-        return "project-evaluation"
-    return "project-evaluation"
-
-
-def _knowledge_point_id_for_topic(workspace: dict[str, Any], topic: str) -> str:
-    match_keywords = {
-        "time-value": ["资金时间", "年金", "名义利率", "fund", "time-value"],
-        "cash-flow-tax": ["税后", "折旧", "所得税", "现金流", "cash", "tax"],
-        "project-evaluation": ["回收期", "npv", "nav", "npvr", "irr", "单一项目", "评价", "evaluation"],
-        "alternatives": ["多方案", "互斥", "独立", "混合", "multi"],
-        "uncertainty": ["盈亏平衡", "敏感性", "不确定性", "bep", "risk"],
-        "excel": ["excel", "pmt", "单变量", "规划求解器"],
-    }
-    points = [point for point in workspace.get("knowledgePoints", []) if isinstance(point, dict)]
-    for point in points:
-        text = " ".join(
-            str(value)
-            for value in (
-                point.get("id", ""),
-                point.get("name", ""),
-                point.get("summary", ""),
-            )
-        ).lower()
-        if _text_has_any(text, match_keywords.get(topic, [])):
-            return str(point.get("id", ""))
-    return str(points[0].get("id", "")) if points else topic
-
-
 def _complete_study_guide(guide: Any) -> bool:
     if not isinstance(guide, dict):
         return False
@@ -2196,220 +1842,13 @@ def _complete_study_guide(guide: Any) -> bool:
     )
 
 
-def _fallback_mock_questions() -> list[dict[str, Any]]:
-    return [
-        {
-            "id": "mock-tax-final-year",
-            "type": "single",
-            "score": 8,
-            "prompt": "某设备购置及安装100万元，寿命10年，期末残值10万元，直线折旧；每年营业收入50万元、付现成本25万元，所得税率33%；期初另垫付营运资金15万元，期末全部收回。最后一年净现金流量约为多少万元？",
-            "options": ["19.72", "29.72", "34.72", "44.72"],
-            "answerIndex": 3,
-            "explanation": "年折旧=(100-10)/10=9；税前利润=50-25-9=16；所得税=5.28；经营NCF=50-25-5.28=19.72；最后一年再加残值10和营运资金15，合计44.72万元。",
-            "knowledgePointId": "cash-flow-tax",
-            "source": "真题第一面 / 第5章税后现金流",
-        },
-        {
-            "id": "mock-effective-rate",
-            "type": "single",
-            "score": 8,
-            "prompt": "年名义利率为12%，按季计息，则实际年利率最接近多少？",
-            "options": ["12.00%", "12.36%", "12.55%", "13.00%"],
-            "answerIndex": 2,
-            "explanation": "季度利率为12%/4=3%，实际年利率=(1+3%)⁴-1=12.55%。",
-            "knowledgePointId": "time-value",
-            "source": "第4章资金时间价值 / 真题名义利率题型",
-        },
-        {
-            "id": "mock-dynamic-payback",
-            "type": "single",
-            "score": 8,
-            "prompt": "某项目第0期投资1000万元，第1至6年每年净现金流入300万元，基准收益率10%。按动态投资回收期计算，回收期约为？",
-            "options": ["3.33年", "4.00年", "4.26年", "5.00年"],
-            "answerIndex": 2,
-            "explanation": "折现现金流累计到第4年仍未回收约49.04万元，第5年折现流入约186.28万元，动态回收期=4+49.04/186.28≈4.26年。",
-            "knowledgePointId": "project-evaluation",
-            "source": "第5章动态投资回收期",
-        },
-        {
-            "id": "mock-excel-npv",
-            "type": "single",
-            "score": 8,
-            "prompt": "项目第0期投资100万元，第1至4年每年年末流入35万元，折现率10%。在 Excel 中正确计算 NPV 的写法是？",
-            "options": [
-                "=NPV(10%, -100, 35, 35, 35, 35)",
-                "=-100+NPV(10%, 35, 35, 35, 35)",
-                "=IRR(-100, 35, 35, 35, 35)",
-                "=PMT(10%, 4, -100)",
-            ],
-            "answerIndex": 1,
-            "explanation": "Excel NPV() 默认第一个 value 是第1期末现金流，不包含第0期，所以第0期投资应在函数外单独相加。",
-            "knowledgePointId": "excel",
-            "source": "第5章 Excel 实践",
-        },
-        {
-            "id": "mock-irr-interpolation",
-            "type": "single",
-            "score": 8,
-            "prompt": "某项目在 i₁=12% 时 NPV₁=20万元，在 i₂=16% 时 NPV₂=-10万元。用线性插值估算 IRR，结果最接近？",
-            "options": ["13.33%", "14.00%", "14.67%", "15.33%"],
-            "answerIndex": 2,
-            "explanation": "IRR=12%+20/(20-(-10))×(16%-12%)=14.67%。",
-            "knowledgePointId": "project-evaluation",
-            "source": "第5章 IRR 插值",
-        },
-        {
-            "id": "mock-nav",
-            "type": "single",
-            "score": 8,
-            "prompt": "某项目 NPV 为30万元，寿命5年，基准收益率10%。其净年值 NAV 最接近多少万元/年？",
-            "options": ["4.91", "6.00", "7.91", "9.00"],
-            "answerIndex": 2,
-            "explanation": "NAV=NPV(A/P,10%,5)，(A/P,10%,5)≈0.2638，所以 NAV≈30×0.2638=7.91万元/年。",
-            "knowledgePointId": "project-evaluation",
-            "source": "第5章 NPV 与 NAV",
-        },
-        {
-            "id": "mock-mutually-exclusive",
-            "type": "single",
-            "score": 8,
-            "prompt": "A、B 为寿命相同的收益型互斥方案。A 投资100万元、NPV=28万元；B 投资150万元、NPV=38万元。若采用差额净现值判断，应选择？",
-            "options": ["选A，因为投资少", "选B，因为 ΔNPV=10万元 > 0", "选A，因为 IRR 未知", "两个都选"],
-            "answerIndex": 1,
-            "explanation": "互斥方案只能选一个；B相对A的差额净现值=38-28=10万元>0，说明追加投资值得，选B。",
-            "knowledgePointId": "alternatives",
-            "source": "第6章差额净现值法",
-        },
-        {
-            "id": "mock-different-life",
-            "type": "single",
-            "score": 8,
-            "prompt": "两个收益型互斥方案寿命不同，且均可重复更新。在没有统一研究期的情况下，优先采用哪种指标比较更合适？",
-            "options": ["直接比较 NPV", "比较净年值 NAV", "比较静态回收期", "只比较初始投资"],
-            "answerIndex": 1,
-            "explanation": "寿命不同会导致 NPV 不直接可比，收益型互斥方案可转为净年值 NAV 进行年化比较。",
-            "knowledgePointId": "alternatives",
-            "source": "第6章寿命不同方案评价",
-        },
-        {
-            "id": "mock-break-even",
-            "type": "single",
-            "score": 9,
-            "prompt": "某产品年固定成本120万元，单价800元/件，单位变动成本500元/件，设计产能8000件。其盈亏平衡生产能力利用率为？",
-            "options": ["37.5%", "50%", "62.5%", "75%"],
-            "answerIndex": 1,
-            "explanation": "保本产量=1200000/(800-500)=4000件；生产能力利用率=4000/8000=50%。",
-            "knowledgePointId": "uncertainty",
-            "source": "第7章盈亏平衡分析",
-        },
-        {
-            "id": "mock-sensitivity",
-            "type": "single",
-            "score": 9,
-            "prompt": "敏感性分析中，销售收入临界变化率为-6%，经营成本临界变化率为+15%，投资额临界变化率为+20%。若只看绝对值，项目对哪个因素最敏感？",
-            "options": ["销售收入", "经营成本", "投资额", "三个因素一样"],
-            "answerIndex": 0,
-            "explanation": "临界变化率绝对值越小，越接近发生临界风险，因素越敏感。|-6%|最小，所以销售收入最敏感。",
-            "knowledgePointId": "uncertainty",
-            "source": "第7章敏感性分析",
-        },
-        {
-            "id": "mock-infinite-overhaul",
-            "type": "single",
-            "score": 9,
-            "prompt": "某无限寿命方案每5年需大修一次，每次大修费50万元，基准收益率10%。若把大修费折算为等额年费用，应使用的表达式是？",
-            "options": ["50(A/P,10%,5)", "50(A/F,10%,5)", "50(P/A,10%,5)", "50(P/F,10%,5)"],
-            "answerIndex": 1,
-            "explanation": "每5年发生一次的费用可看作已知第5年终值 F，折为每年等额 A，应使用 A/F 系数。",
-            "knowledgePointId": "alternatives",
-            "source": "第6章无限寿命方案 / 综合模拟错疑点",
-        },
-        {
-            "id": "mock-pmt",
-            "type": "single",
-            "score": 9,
-            "prompt": "用10%年利率借款20000元，计划10年内每年年末等额收回。若在 Excel 中希望得到正的年收回额，较合适的函数写法是？",
-            "options": ["=PMT(10%,10,20000)", "=PMT(10%,10,-20000)", "=NPV(10%,20000)", "=IRR(20000)"],
-            "answerIndex": 1,
-            "explanation": "PMT 的现金流方向与 pv 相反。把 pv 写成 -20000，可得到正的每年收回额，约为3254.91元。",
-            "knowledgePointId": "excel",
-            "source": "第5章 Excel 实践 PMT",
-        },
-    ]
-
-
-def _fallback_mixed_mock_questions() -> list[dict[str, Any]]:
-    choice_questions = [
-        {**question, "score": 5, "questionType": "单项选择题"}
-        for question in _fallback_mock_questions()[:6]
-    ]
-    calculation_questions = [
-        {
-            "id": "mock-calc-cash-flow-tax",
-            "type": "calculation",
-            "questionType": "计算题",
-            "score": 20,
-            "prompt": "某设备购置及安装费100万元，寿命10年，期末残值10万元，直线折旧；每年营业收入50万元，付现成本25万元，所得税率33%；期初另垫付营运资金15万元，期末全部收回。写出年折旧、正常年份经营净现金流量和最后一年净现金流量。",
-            "referenceAnswer": "年折旧=(100-10)/10=9万元；税前利润=50-25-9=16万元；所得税=16×33%=5.28万元；正常年份经营净现金流量=50-25-5.28=19.72万元；最后一年净现金流量=19.72+10+15=44.72万元。",
-            "gradingRubric": ["年折旧计算正确4分", "所得税与经营净现金流计算正确8分", "最后一年加入残值和营运资金回收8分"],
-            "explanation": "本题关键是区分付现成本、折旧抵税和期末回收项。折旧不直接作为现金流出，但会影响所得税；最后一年还要加残值和营运资金回收。",
-            "knowledgePointId": "cash-flow-tax",
-            "source": "真题第一面 / 第5章税后现金流",
-        },
-        {
-            "id": "mock-calc-dynamic-payback-npv",
-            "type": "calculation",
-            "questionType": "计算题",
-            "score": 20,
-            "prompt": "某项目第0期投资1000万元，第1至6年每年年末净现金流入300万元，基准收益率10%。计算动态投资回收期，并判断项目净现值是否大于0。",
-            "referenceAnswer": "各年折现流入约为272.73、247.93、225.39、204.90、186.28、169.35万元。累计折现到第4年为950.95万元，尚差49.05万元；第5年折现流入186.28万元，所以动态回收期=4+49.05/186.28≈4.26年。6年折现流入合计1306.58万元，NPV≈306.58万元>0。",
-            "gradingRubric": ["正确折现各年现金流6分", "累计折现并定位回收年份6分", "插值计算动态回收期4分", "计算或判断NPV大于0为4分"],
-            "explanation": "动态回收期必须用折现后的现金流累计，不能直接用1000/300。NPV为折现流入总和减初始投资。",
-            "knowledgePointId": "payback-period",
-            "source": "第5章动态投资回收期 / NPV",
-        },
-        {
-            "id": "mock-calc-mutually-exclusive",
-            "type": "calculation",
-            "questionType": "计算题",
-            "score": 15,
-            "prompt": "A、B两个收益型互斥方案寿命相同。A初始投资100万元，年净收益35万元；B初始投资150万元，年净收益48万元；寿命5年，基准收益率10%，残值均为0。用净现值或差额净现值判断应选哪个方案。",
-            "referenceAnswer": "(P/A,10%,5)≈3.7908。NPV_A=-100+35×3.7908=32.68万元；NPV_B=-150+48×3.7908=31.96万元。或差额方案B-A：ΔNPV=-50+13×3.7908=-0.72万元<0，所以选A。",
-            "gradingRubric": ["正确使用年金现值系数4分", "分别计算两个NPV或差额NPV7分", "根据互斥方案规则作出选择4分"],
-            "explanation": "互斥方案不能只看收益高低，必须比较增量投资是否值得或直接比较NPV。这里B的追加投资不合算。",
-            "knowledgePointId": "alternatives",
-            "source": "第6章互斥方案经济评价",
-        },
-        {
-            "id": "mock-calc-break-even",
-            "type": "calculation",
-            "questionType": "计算题",
-            "score": 15,
-            "prompt": "某产品年固定成本120万元，单价800元/件，单位变动成本500元/件，设计产能8000件。计算盈亏平衡产量、生产能力利用率，并说明若固定成本上升，项目抗风险能力如何变化。",
-            "referenceAnswer": "单位边际贡献=800-500=300元/件；盈亏平衡产量=1200000/300=4000件；生产能力利用率=4000/8000=50%。固定成本上升会提高盈亏平衡产量和利用率，安全裕度下降，抗风险能力变弱。",
-            "gradingRubric": ["边际贡献计算正确3分", "盈亏平衡产量计算正确5分", "生产能力利用率计算正确4分", "风险含义判断正确3分"],
-            "explanation": "盈亏平衡点越高，达到保本所需销量越大，项目对市场波动越敏感。",
-            "knowledgePointId": "uncertainty",
-            "source": "第7章盈亏平衡分析",
-        },
-    ]
-    return choice_questions + calculation_questions
-
-
-def _workspace_mentions_calculation_mock(workspace: dict[str, Any]) -> bool:
-    onboarding = workspace.get("onboarding", {})
-    assessment_profile = workspace.get("assessmentProfile", {})
-    text = json.dumps({"onboarding": onboarding, "assessmentProfile": assessment_profile}, ensure_ascii=False)
-    return "计算题" in text or "计算占大头" in text
-
-
-def _mock_questions_have_written_part(mock_questions: Any) -> bool:
-    if not isinstance(mock_questions, list):
-        return False
-    return any(isinstance(question, dict) and _is_written_mock_question(question) for question in mock_questions)
-
 
 def _build_study_guide_sections(guide: dict[str, Any]) -> list[dict[str, Any]]:
+    existing_sections = guide.get("sections")
+    if isinstance(guide.get("storyContext"), dict) and isinstance(existing_sections, list):
+        story_kinds = {str(section.get("kind")) for section in existing_sections if isinstance(section, dict)}
+        if {"preparation", "explanation", "examples", "self-check"}.issubset(story_kinds):
+            return existing_sections
     example = guide.get("example") if isinstance(guide.get("example"), dict) else {}
     worked_examples = list(guide.get("workedExamples", []))
     if not worked_examples and example:
@@ -2450,9 +1889,6 @@ def _build_study_guide_sections(guide: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _ensure_workspace_content_quality(workspace: dict[str, Any]) -> bool:
     changed = False
-    course = workspace.get("course", {})
-    course_name = str(course.get("name", "")).strip() if isinstance(course, dict) else ""
-    is_engineering_economics = course_name == "工程经济学"
     points = [point for point in workspace.get("knowledgePoints", []) if isinstance(point, dict)]
     for task in workspace.get("tasks", []):
         if not isinstance(task, dict):
@@ -2481,27 +1917,15 @@ def _ensure_workspace_content_quality(workspace: dict[str, Any]) -> bool:
                 guide["sections"] = expected_sections
                 changed = True
 
-    mock_questions = workspace.get("mockQuestions")
-    if is_engineering_economics and (
-        not isinstance(mock_questions, list) or not mock_questions
-    ):
-        workspace["mockQuestions"] = _fallback_mixed_mock_questions() if _workspace_mentions_calculation_mock(workspace) else _fallback_mock_questions()
-        changed = True
-    elif is_engineering_economics and _workspace_mentions_calculation_mock(workspace) and not _mock_questions_have_written_part(mock_questions):
-        workspace["mockQuestions"] = _fallback_mixed_mock_questions()
-        changed = True
-
+    # 模拟卷缺失或题型不完整时由通用 question-generation/repair 工作流处理。
+    # 这里仅修复悬空的知识点引用，不再按任何具体课程注入静态题库。
     known_point_ids = {str(point.get("id", "")) for point in points}
     default_point_id = next(iter(known_point_ids), "diagnostic")
     for question in workspace.get("mockQuestions", []):
         if not isinstance(question, dict):
             continue
         if str(question.get("knowledgePointId", "")) not in known_point_ids:
-            question["knowledgePointId"] = (
-                _knowledge_point_id_for_topic(workspace, _study_topic_for_task(question))
-                if is_engineering_economics
-                else default_point_id
-            )
+            question["knowledgePointId"] = default_point_id
             changed = True
 
     if workspace.get("workspaceContentVersion") != WORKSPACE_CONTENT_VERSION:
@@ -2529,281 +1953,15 @@ def _clear_pre_plan_content(workspace: dict[str, Any]) -> None:
         workspace["diagnosticQuestions"] = []
 
 
-def _fallback_workspace(materials: list[dict[str, Any]]) -> dict[str, Any]:
-    return {
-        "course": {
-            "id": "engineering-economics",
-            "name": "工程经济学",
-            "examDate": "期末冲刺",
-            "targetScore": 80,
-            "dailyHours": 2,
-            "progress": 0,
-            "color": "#ff537f",
-            "icon": "math",
-        },
-        "assessmentProfile": {
-            "summary": "真题以单项选择和计算题为主，重点考资金时间价值、评价指标、多方案与不确定性分析，并穿插 Excel 函数操作。",
-            "questionTypes": ["单项选择", "计算题", "Excel 实操判断"],
-        },
-        "diagnostic": {"estimatedScore": "未摸底", "message": "先完成 6 道定向题，系统会根据结果更新薄弱点。"},
-        "modules": [
-            {"id": "mod-time-value", "title": "资金时间价值", "order": 1},
-            {"id": "mod-cashflow-eval", "title": "现金流与评价指标", "order": 2},
-            {"id": "mod-alternatives", "title": "多方案经济评价", "order": 3},
-            {"id": "mod-uncertainty", "title": "不确定性分析", "order": 4},
-        ],
-        "knowledgePoints": [
-            {
-                "id": "time-value",
-                "name": "资金时间价值与年金",
-                "mastery": 45,
-                "weight": 23,
-                "summary": "P/F、F/P、P/A、A/P、普通年金、即付年金、递延年金与名义/实际利率。",
-                "source": "第4章课件 / 真题第2、6、7题",
-                "moduleId": "mod-time-value",
-            },
-            {
-                "id": "project-evaluation",
-                "name": "NPV、NAV、IRR 与投资回收期",
-                "mastery": 42,
-                "weight": 25,
-                "summary": "静态/动态回收期、净现值、净年值、内部收益率插值与 Excel NPV/IRR。",
-                "source": "第5章课件 / 真题第3、5题",
-                "moduleId": "mod-cashflow-eval",
-            },
-            {
-                "id": "cash-flow-tax",
-                "name": "折旧、所得税与净现金流",
-                "mastery": 38,
-                "weight": 20,
-                "summary": "折旧税盾、经营净现金流、残值和营运资金回收。",
-                "source": "第5章课件 / 真题第1题",
-                "moduleId": "mod-cashflow-eval",
-            },
-            {
-                "id": "alternatives",
-                "name": "多方案经济评价",
-                "mastery": 35,
-                "weight": 18,
-                "summary": "互斥、独立、混合方案；寿命不等时的年值法与费用法。",
-                "source": "第6章课件 / 复习总览",
-                "moduleId": "mod-alternatives",
-            },
-            {
-                "id": "uncertainty",
-                "name": "盈亏平衡、敏感性与概率分析",
-                "mastery": 40,
-                "weight": 14,
-                "summary": "盈亏平衡点、临界变化率、期望值与风险判断。",
-                "source": "第7章课件 / 复习总览",
-                "moduleId": "mod-uncertainty",
-            },
-        ],
-        "tasks": [
-            {
-                "id": "day1-time-value",
-                "courseId": "engineering-economics",
-                "day": 1,
-                "order": 1,
-                "title": "资金时间价值与真题选择题",
-                "description": "完成一次支付、普通/永续年金、名义与实际利率的公式复盘，再做真题同型选择。",
-                "source": "第4章课件 / 真题第2、4、6、7题",
-                "duration": 60,
-                "progress": 0,
-                "weight": 23,
-                "knowledgePointId": "time-value",
-                "status": "pending",
-                "priority": "high",
-            },
-            {
-                "id": "day1-cash-flow",
-                "courseId": "engineering-economics",
-                "day": 1,
-                "order": 2,
-                "title": "税后现金流与折旧税盾",
-                "description": "按“收入-付现成本-所得税”写出经营净现金流，核对最后一年残值与营运资金。",
-                "source": "第5章课件 / 真题第1题",
-                "duration": 60,
-                "progress": 0,
-                "weight": 20,
-                "knowledgePointId": "cash-flow-tax",
-                "status": "pending",
-                "priority": "high",
-            },
-            {
-                "id": "day2-indicators",
-                "courseId": "engineering-economics",
-                "day": 2,
-                "order": 1,
-                "title": "回收期、NPV、NAV、IRR 计算",
-                "description": "区分静态与动态回收期，完成 NPV、NAV、IRR 插值与 Excel 函数专项。",
-                "source": "第5章课件 / Excel 实践 / 真题第3、5题",
-                "duration": 60,
-                "progress": 0,
-                "weight": 25,
-                "knowledgePointId": "project-evaluation",
-                "status": "pending",
-                "priority": "high",
-            },
-            {
-                "id": "day2-alternatives",
-                "courseId": "engineering-economics",
-                "day": 2,
-                "order": 2,
-                "title": "多方案评价方法选择",
-                "description": "按“关系-寿命-收益/费用-资金约束”判断差额 NPV、NAV、费用年值或列组合。",
-                "source": "第6章课件 / 复习总览",
-                "duration": 60,
-                "progress": 0,
-                "weight": 18,
-                "knowledgePointId": "alternatives",
-                "status": "pending",
-                "priority": "high",
-            },
-            {
-                "id": "day3-uncertainty",
-                "courseId": "engineering-economics",
-                "day": 3,
-                "order": 1,
-                "title": "不确定性分析与 Excel 易错点",
-                "description": "掌握盈亏平衡公式、敏感性结论、期望值，并回刷 NPV 第0期与 IRR 现金流序列。",
-                "source": "第7章课件 / Excel 操作课件",
-                "duration": 60,
-                "progress": 0,
-                "weight": 14,
-                "knowledgePointId": "uncertainty",
-                "status": "pending",
-                "priority": "medium",
-            },
-            {
-                "id": "day3-mock",
-                "courseId": "engineering-economics",
-                "day": 3,
-                "order": 2,
-                "title": "综合模拟与错题回顾",
-                "description": "限时完成模拟卷，按错因回补公式、时间点和方法选择。",
-                "source": "真题第一面 / 课后练习题",
-                "duration": 60,
-                "progress": 0,
-                "weight": 25,
-                "knowledgePointId": "project-evaluation",
-                "status": "pending",
-                "priority": "high",
-            },
-        ],
-        "practiceQuestions": [
-            {
-                "id": "practice-effective-rate",
-                "type": "single",
-                "score": 5,
-                "prompt": "当年名义利率固定且每年计息次数增加时，实际年利率的变化是？",
-                "options": ["逐渐减小", "保持不变", "逐渐增大", "无法判断"],
-                "answerIndex": 2,
-                "explanation": "名义利率固定时，计息周期越短，复利次数越多，实际年利率越高。",
-                "knowledgePointId": "time-value",
-                "source": "第4章课件 / 真题第2题",
-            },
-            {
-                "id": "practice-npv-excel",
-                "type": "single",
-                "score": 5,
-                "prompt": "在 Excel 中计算项目净现值，初始投资发生在第0期，正确写法是？",
-                "options": [
-                    "=NPV(rate, 第0期现金流, 第1期现金流, ...)",
-                    "=第0期现金流+NPV(rate, 第1期现金流, 第2期现金流, ...)",
-                    "=IRR(第0期现金流:最后一期现金流)",
-                    "=PMT(rate, nper, pv)",
-                ],
-                "answerIndex": 1,
-                "explanation": "Excel 的 NPV() 从第1期末开始折现，不包括第0期现金流；初始投资需单独加上。",
-                "knowledgePointId": "project-evaluation",
-                "source": "Excel 课件 / 复习总览",
-            },
-            {
-                "id": "practice-tax-cashflow",
-                "type": "single",
-                "score": 5,
-                "prompt": "下列关于折旧的表述，正确的是？",
-                "options": [
-                    "折旧是每年实际付现成本",
-                    "折旧不影响现金流，因此不影响项目评价",
-                    "折旧本身不付现，但会通过所得税影响经营净现金流",
-                    "项目最后一年不需要考虑残值",
-                ],
-                "answerIndex": 2,
-                "explanation": "折旧不是付现成本，但会降低应纳税所得额，形成折旧税盾并影响税后净现金流。",
-                "knowledgePointId": "cash-flow-tax",
-                "source": "第5章课件 / 真题第1题",
-            },
-            {
-                "id": "practice-alternative",
-                "type": "single",
-                "score": 5,
-                "prompt": "对于寿命期不同、收益型且互斥的方案，优先采用哪种方法比较？",
-                "options": ["直接比较 NPV", "比较净年值 NAV", "比较静态回收期", "只比较 IRR"],
-                "answerIndex": 1,
-                "explanation": "寿命期不同需先解决时间可比性，收益型互斥方案优先转为净年值 NAV 比较。",
-                "knowledgePointId": "alternatives",
-                "source": "第6章课件 / 复习总览",
-            },
-            {
-                "id": "practice-break-even",
-                "type": "single",
-                "score": 5,
-                "prompt": "盈亏平衡点越低，通常说明项目的？",
-                "options": ["抗风险能力越弱", "抗风险能力越强", "固定成本越高", "利润一定越高"],
-                "answerIndex": 1,
-                "explanation": "盈亏平衡点越低，项目达到不亏损所需的销量或产量越低，安全余量更大。",
-                "knowledgePointId": "uncertainty",
-                "source": "第7章课件 / 复习总览",
-            },
-            {
-                "id": "practice-irr",
-                "type": "single",
-                "score": 5,
-                "prompt": "已知 i1 时 NPV1 为正、i2 时 NPV2 为负，求 IRR 的线性插值表达式是？",
-                "options": [
-                    "i1+NPV1/(NPV1-NPV2)×(i2-i1)",
-                    "i1+NPV2/(NPV1+NPV2)×(i2-i1)",
-                    "NPV1/NPV2",
-                    "i1×i2",
-                ],
-                "answerIndex": 0,
-                "explanation": "IRR 用一正一负两个净现值线性插值：i1+NPV1/(NPV1-NPV2)×(i2-i1)。",
-                "knowledgePointId": "project-evaluation",
-                "source": "第5章课件 / 真题第5题",
-            },
-        ],
-        "mockQuestions": _fallback_mock_questions(),
-        "wrongAnswers": [],
-        "note": "## 工程经济学考前笔记\n\n- 现金流量默认年末发生；第0期初始投资单独处理。\n- Excel NPV 不含第0期现金流；IRR 的现金流序列要包含第0期。\n- 寿命不等的互斥方案优先转为 NAV 或费用年值比较。",
-        "messages": [
-            {
-                "id": "engineering-welcome",
-                "role": "assistant",
-                "content": "工程经济学资料已完成索引。我会围绕真题高频的资金时间价值、评价指标、税后现金流和多方案比较，安排 3 天、每天 2 小时的 80+ 冲刺主线。",
-                "createdAt": "刚刚",
-            }
-        ],
-    }
-
-
 def _empty_course_workspace(
     materials: list[dict[str, Any]] | None = None,
     *,
     course: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    course_payload = course or {
-        "id": DEFAULT_COURSE_ID,
-        "name": "工程经济学",
-        "examDate": "待填写",
-        "targetScore": 60,
-        "dailyHours": 2,
-        "progress": 0,
-        "color": "#ff537f",
-        "icon": "math",
-    }
-    course_id = str(course_payload["id"])
+    if not isinstance(course, dict):
+        raise ValueError("创建课程学习空间必须提供课程信息")
+    course_payload = course
+    course_id = _validate_course_id(str(course_payload.get("id") or ""))
     current_materials = materials if materials is not None else scan_course_materials(course_id)
     course_name = str(course_payload["name"])
     target_score = int(course_payload.get("targetScore", 60))
@@ -2853,12 +2011,12 @@ def _empty_course_workspace(
     return workspace
 
 
-def create_empty_course_workspace(course_id: str = DEFAULT_COURSE_ID) -> dict[str, Any]:
+def create_empty_course_workspace(course_id: str) -> dict[str, Any]:
     workspace = _empty_course_workspace(
         scan_course_materials(course_id),
         course={
             "id": course_id,
-            "name": "工程经济学" if course_id == DEFAULT_COURSE_ID else "未命名课程",
+            "name": "未命名课程",
             "examDate": "待填写",
             "targetScore": 60,
             "dailyHours": 2,
@@ -2916,7 +2074,7 @@ def _quiz_list_from_model(content: str) -> list[dict[str, Any]]:
 def _generate_diagnostic_questions(
     materials: list[dict[str, Any]],
     onboarding: dict[str, Any],
-    course_id: str = DEFAULT_COURSE_ID,
+    course_id: str,
 ) -> list[dict[str, Any]]:
     context = _source_context(materials, course_id)
     prompt = with_structured_formula_rules("""
@@ -2942,10 +2100,26 @@ def _generate_diagnostic_questions(
 
 def save_course_setup(
     setup: dict[str, Any],
-    course_id: str = DEFAULT_COURSE_ID,
+    course_id: str,
 ) -> dict[str, Any]:
     workspace_path = _workspace_path(course_id)
-    workspace = load_workspace(course_id, refresh_materials=False) if workspace_path.exists() else _empty_course_workspace([])
+    workspace = (
+        load_workspace(course_id, refresh_materials=False)
+        if workspace_path.exists()
+        else _empty_course_workspace(
+            [],
+            course={
+                "id": course_id,
+                "name": str(setup["course_name"]),
+                "examDate": str(setup.get("exam_date") or "待填写"),
+                "targetScore": int(setup["target_score"]),
+                "dailyHours": float(setup["daily_hours"]),
+                "progress": 0,
+                "color": "#3973e8",
+                "icon": "book",
+            },
+        )
+    )
     materials = scan_course_materials(course_id)
     if not materials:
         raise ValueError("请先在资料库导入至少一份复习资料")
@@ -2961,6 +2135,7 @@ def save_course_setup(
         "reviewCount": int(setup.get("review_count") or 0) or setup["days"],
         "examFormat": setup.get("exam_format", ""),
         "remarks": setup.get("remarks", ""),
+        "contentStyle": normalize_course_content_style(str(setup.get("content_style") or "story")),
         "updatedAt": datetime.now().isoformat(timespec="seconds"),
     }
     workspace["course"] = {
@@ -2975,7 +2150,7 @@ def save_course_setup(
         "icon": str(workspace.get("course", {}).get("icon") or "system"),
     }
     workspace["assessmentProfile"] = {
-        "summary": "课程信息已保存，AI 将基于资料和摸底结果初始化复习主线。",
+        "summary": "课程信息已保存，AI 将基于课程资料和你的复习目标初始化复习主线。",
         "questionTypes": [onboarding["examFormat"] or "待从资料和备注中判断"],
     }
     workspace["diagnostic"] = {
@@ -3078,11 +2253,11 @@ def _read_strategy_document(course_id: str, document_key: str) -> str:
     return current_path.read_text(encoding="utf-8") if current_path.exists() else ""
 
 
-def get_course_prompt(course_id: str = DEFAULT_COURSE_ID) -> str:
+def get_course_prompt(course_id: str) -> str:
     return _read_strategy_document(course_id, "coursePrompt")
 
 
-def get_strategy_documents(course_id: str = DEFAULT_COURSE_ID) -> dict[str, Any]:
+def get_strategy_documents(course_id: str) -> dict[str, Any]:
     workspace = load_workspace(course_id, refresh_materials=False)
     strategy_documents = workspace.get("strategyDocuments", {})
 
@@ -3105,7 +2280,7 @@ def get_strategy_documents(course_id: str = DEFAULT_COURSE_ID) -> dict[str, Any]
     }
 
 
-def _generate_strategy_documents_legacy(course_id: str = DEFAULT_COURSE_ID) -> dict[str, Any]:
+def _generate_strategy_documents_legacy(course_id: str) -> dict[str, Any]:
     workspace = load_workspace(course_id, refresh_materials=False)
     onboarding = workspace.get("onboarding", {})
     if onboarding.get("status") != "strategy-review":
@@ -3113,67 +2288,42 @@ def _generate_strategy_documents_legacy(course_id: str = DEFAULT_COURSE_ID) -> d
     materials = scan_course_materials(course_id)
     context = _source_context(materials, course_id)
     task_prompt = """
-根据课程资料、用户复习目标和完整摸底结果，同时生成两份可由用户审阅的 Markdown 初稿。只返回 JSON 对象：
+根据课程资料和用户复习目标，同时生成两份可由用户审阅的 Markdown 初稿。摸底测试仅供用户体验题目，不得影响知识点重要程度、讲解篇幅或课程顺序。只返回 JSON 对象：
 {
-  "reviewPlanMarkdown":"完整复习计划 Markdown",
+  "reviewPlanMarkdown":"精简复习计划 Markdown",
   "coursePromptMarkdown":"完整课程总 Prompt Markdown"
 }
 
-复习计划不是概述，而是一份拿来即可逐日执行的期末速成作战表。必须满足以下要求：
-1. 严格使用以下一级、二级章节，顺序不得改变：
-   # 课程速通复习总计划
-   ## 学习目标与时间约束
-   ## 摸底结论
-   ## 考试范围与复习重点
-   ## 知识点优先级
-   ## 总体时间分配
-   ## 分阶段复习策略
-   ## 检验标准
-   ## 动态调整规则
-   ## 当前进度快照
-2. 从用户设置读取复习天数 N 和每日可用小时数。`分阶段复习策略`必须逐一写出 `### 第1天：具体主题` 至 `### 第N天：具体主题`，不得合并、跳过、只写阶段名称或使用“后续几天同理”。即使 N 较大，也必须保留每天不同的知识点、训练任务和验收目标；篇幅不足时压缩背景说明，不得压缩逐日执行表。若用户设置的「复习次数」(reviewCount) 小于复习天数 N，说明并非每天复习：仅在间隔分布的复习日安排完整学习内容，其余天标题写为「休息日（回顾/机动）」并简述用途，仍保留 N 个二级标题与序号，不得删除或合并。
-3. 每一天必须严格使用下面的完整结构，不得省略任何小节：
-   - `#### 当日目标与安排思路`：写明当天要提升的具体能力，以及对应的摸底错题、掌握度、题型分值、考试频率、老师强调或前置依赖；
-   - `#### 当日时间表`：给出 3-6 个按执行顺序排列的学习块。每个学习块明确分钟数、具体知识点、学习动作、练习题型、完成产出和验收标准；
-   - `#### 当日必会清单`：逐条列出当天必须能够脱离资料复述或默写的公式、定义、判别条件、解题步骤和易错边界；
-   - `#### 当日闭环测试`：写明题量、题型、限时、分值或正确率阈值，并说明错题如何订正、复练和判定掌握；
-   - `#### 当日复盘与次日调整`：写明当天需要记录的结果，以及未达标、刚好达标和提前达标三种情况下第二天具体增删哪些任务、调整多少分钟。
-4. 每日学习块必须使用 Markdown 表格，列为：`用时 | 具体知识点 | 执行动作 | 练习与产出 | 完成标准`。每天用时合计不得超过用户的每日可用时间，应使用 90%-100% 的可用时间；如保留机动时间，必须明确写出分钟数和用途。
-5. “具体知识点”必须细化到可学习、可出题的粒度，例如具体定义、公式、计算步骤、易错边界或题型，不能只写“复习第一章”“掌握重点”“刷题”等空泛任务。
-6. “执行动作”必须写清怎么速成，例如：先用多少分钟理解概念，再默写哪些公式，精做哪类例题，限时完成多少题，如何订正和复述。不得只写“阅读、理解、巩固”。
-7. 知识点排序必须综合资料中的考试频率或老师强调、题型分值、摸底正误、目标分差和前置依赖。摸底答错或不会且考试价值高的内容优先；已经掌握的低价值内容只安排快速验证。
-   - 高优先级知识点不能只出现一次，首次学习后必须安排至少一次间隔复练或综合题调用，并标明复练发生在哪一天；
-   - 每个高、中优先级知识点都必须能在逐日计划中找到明确天次，不能只出现在优先级表中；
-   - 相邻两天不得机械复制相同任务，后一天必须体现新知识输入、难度升级、交叉综合或错题回收中的至少一种变化。
-8. `知识点优先级`使用表格，至少写明：优先级、知识点、摸底表现、考试价值、预计投入、安排天次和排序理由。
-9. `总体时间分配`按知识模块和“概念理解/公式记忆/例题拆解/限时训练/错题复盘/模拟检测”两种维度分别给出分钟数，且与逐日计划总时长基本一致。
-10. `检验标准`必须是可量化的，包括每日达标线、阶段达标线、模拟卷目标和进入下一阶段的条件；不能使用“基本掌握”“有所提升”等不可验证表述。
-11. `动态调整规则`至少覆盖：当日完成不足、连续错同一知识点、正确率提前达标、模拟卷暴露新弱点、资料新增五种情况，并明确时间从哪里挪到哪里。
-12. 最后一天必须包含综合限时检测和错题回收；如果只有 1 天，则在当天末尾完成。如果复习天数较多，应安排阶段检测，但仍需逐日给出具体任务。
-13. 只能使用输入中真实存在的资料、章节、题目和课程事实；证据不足的考试范围明确标记“待用户确认”，但不要在用户可见正文中展示资料出处、来源标签或引用标记。
-14. 计划正文应充分详细，但避免重复定义和大段教材式讲解；重点写清“哪一天、学什么、用多久、怎么学、做什么题、做到什么程度”。
-15. 每日计划必须形成完整学习闭环，至少包含一次主动回忆或公式默写、一次例题拆解、一次独立限时作答和一次错题订正；不能把整天安排成阅读资料或观看讲解。
-16. “练习与产出”必须是可检查的实体，例如“完成 6 道净现值计算并保留现金流时间轴”“闭卷默写 5 个判别公式”“整理 1 页错因对照表”，不得写“加深理解”“熟悉内容”等抽象结果。
-17. 在返回 JSON 前自行逐项检查：
-   - 是否恰好生成 N 个逐日计划；
-   - 每天时间表分钟数之和是否符合每日时间预算；
-   - 每天是否具备五个规定小节和完整闭环；
-   - 所有高、中优先级知识点是否已落实到具体天次；
-   - 是否存在编造的资料名称、章节、页码、考试范围或学习进度；
-   - 是否仍有“酌情复习、根据情况调整、复习重点、做一些题”等不可直接执行的占位表达。
-   任一项不满足时，先在内部修正后再输出最终 JSON，不要输出检查过程。
+复习计划必须短、清楚、能直接执行，用户可见正文只保留以下三个二级章节，顺序不得改变，不得增加其他二级章节：
+# 课程速通复习总计划
+## 主线规划
+## 知识点与讲解深度
+## 每日计划
 
-课程总 Prompt 必须依次包含：角色与最终目标、资料使用规则、教学与解释方式、出题与讲评规则、复习计划调整规则、输出格式与语言、用户特别要求。
-两份文档必须具体使用当前课程事实，不得声称尚未发生的学习进度；用户可见内容应专注知识点、方法和练习安排，不展示出处来源。
-"""
+【课程顺序硬合同】
+1. 先识别主资料的目录树及章节、小节、页码或课件原始顺序，再严格按该顺序安排知识点和每天的新课。主资料是用户标记的主资料、核心讲义或教材；辅资料只能在对应知识点原位置补充例题、题型、易错点和解释，不能改变主线。
+2. 若没有主资料标记，严格按照上传资料自然顺序以及各资料内部目录、章节、小节、页码或课件出现顺序推进。
+3. 知识点没有“学习优先级”，只有“重要程度”。重要程度、考试价值、难度、正式学习中的薄弱程度和失分情况，只能决定知识点在原位置的讲解篇幅、分钟数、例题和自测数量、复练强度；严禁据此提前、延后、插队、跨章或交换知识点顺序。
+4. 复练只能作为明确标注的复习块插在当天末尾或后续天，不能打断新知识的原始推进顺序。任何动态调整也只能增减时长、题量和复练，不能重排主线。
+
+【三个章节的内容合同】
+1. `主线规划`：只用 3-6 个短段或有序项，按资料框架说明从哪个章节讲到哪个章节、相邻章节如何衔接。不得写“学习目标与时间约束”“总体时间分配”“动态调整规则”“当前进度快照”等套话。
+2. `知识点与讲解深度`：按主资料原始顺序使用一张表格，列为 `顺序 | 知识点 | 重要程度 | 讲解与训练安排`。重要程度只能写“重点详讲 / 常规讲解 / 简要覆盖”，不得出现“高/中/低优先级”“排序理由”或暗示先学重要知识点的措辞。
+3. `每日计划`：从第1天到第N天逐日列出，不得缺天、合并或使用“后续同理”。每天只保留：一句当日目标、一张执行表。
+4. 每日执行表列为 `用时 | 按主线学习的知识点 | 怎么学与完成什么 | 验收标准`，每个学习块必须明确分钟数、具体知识点、动作、可检查产出和量化标准。每天总分钟数使用可用时间的80%-100%，不得超出预算。
+5. 如果 reviewCount 小于复习天数 N，仅在按间隔分布的复习日安排完整学习内容，其余天标为“休息日（回顾/机动）”，但仍保留 N 天。最后一个学习日完成综合检测和错题回收。
+6. 只使用输入中真实存在的课程事实；证据不足的范围写“待用户确认”。用户可见正文不得展示资料出处、来源标签或内部字段。
+7. 详细定义、教材式讲解和完整例题留给后续课程内容生成；总计划不展开讲课，不重复同一要求。
+
+输出前自行检查：知识点表和每日首次学习的知识点顺序是否与主资料完全一致；重要程度是否只影响详略而未影响顺序；是否只有三个二级章节；是否恰好生成 N 天；任一项不满足时先内部修正，不输出检查过程。
+
+课程总 Prompt 必须依次包含：角色与最终目标、资料使用规则、教学与解释方式、出题与讲评规则、复习计划调整规则、输出格式与语言、用户特别要求。其中必须写明：课程严格按主资料框架和章节顺序生成；知识点重要程度只影响内容深度、篇幅、题量和复练，不影响课程顺序。
+两份文档必须具体使用当前课程事实，不得声称尚未发生的学习进度。
+    """
     payload = {
         "course": workspace.get("course", {}),
         "onboarding": onboarding,
         "assessmentProfile": workspace.get("assessmentProfile", {}),
-        "diagnostic": workspace.get("diagnostic", {}),
-        "diagnosticQuestions": workspace.get("diagnosticQuestions", []),
-        "diagnosticAnswers": workspace.get("diagnosticAnswers", {}),
-        "diagnosticResults": workspace.get("diagnosticResults", []),
     }
     strategy_documents = workspace.setdefault("strategyDocuments", {})
     strategy_documents["status"] = "generating"
@@ -3184,7 +2334,7 @@ def _generate_strategy_documents_legacy(course_id: str = DEFAULT_COURSE_ID) -> d
             _model_completion(
                 build_model_messages(
                     task_prompt,
-                    f"【课程与摸底状态】\n{json.dumps(payload, ensure_ascii=False, indent=2)}\n\n{context}",
+                    f"【课程状态】\n{json.dumps(payload, ensure_ascii=False, indent=2)}\n\n{context}",
                 ),
                 json_mode=True,
             )
@@ -3197,7 +2347,7 @@ def _generate_strategy_documents_legacy(course_id: str = DEFAULT_COURSE_ID) -> d
             "reviewPlan",
             review_plan,
             updated_by="ai",
-            change_summary="根据课程资料、用户目标和摸底结果生成初稿",
+            change_summary="根据课程资料和用户目标生成初稿",
         )
         _write_strategy_document(
             workspace,
@@ -3205,7 +2355,7 @@ def _generate_strategy_documents_legacy(course_id: str = DEFAULT_COURSE_ID) -> d
             "coursePrompt",
             course_prompt,
             updated_by="ai",
-            change_summary="根据课程资料、用户目标和摸底结果生成初稿",
+            change_summary="根据课程资料和用户目标生成初稿",
         )
         strategy_documents["status"] = "review"
         strategy_documents["maintenancePending"] = False
@@ -3218,7 +2368,7 @@ def _generate_strategy_documents_legacy(course_id: str = DEFAULT_COURSE_ID) -> d
         raise RuntimeError(f"策略文档生成失败：{error}") from error
 
 
-def generate_strategy_documents(course_id: str = DEFAULT_COURSE_ID) -> dict[str, Any]:
+def generate_strategy_documents(course_id: str) -> dict[str, Any]:
     workspace = load_workspace(course_id, refresh_materials=False)
     onboarding = workspace.get("onboarding", {})
     if onboarding.get("status") != "strategy-review":
@@ -3305,10 +2455,126 @@ def save_strategy_documents(
     return get_strategy_documents(course_id)
 
 
+#策略草稿对话修订：AI 只变换前端传来的草稿文本，不落盘、不写对话记忆。
+REPLY_DELIMITER = "<<<REPLY>>>"
+REVIEW_PLAN_DELIMITER = "<<<REVIEW_PLAN>>>"
+COURSE_PROMPT_DELIMITER = "<<<COURSE_PROMPT>>>"
+
+STRATEGY_REVISION_TASK_PROMPT = f"""
+你是复习策略草稿修订助手。用户正在审阅 AI 初步生成的《复习计划》和《课程总 Prompt》两份 Markdown 草稿，
+会用自己的话提出修改诉求；你需要据此返回修订后的完整草稿。
+
+输出必须是且仅是以下格式（三段定界标记独占一行，不得加代码围栏）：
+{REPLY_DELIMITER}
+（给用户看的回复：改了什么、为什么这样改，1-4 句中文）
+{REVIEW_PLAN_DELIMITER}
+（修订后的完整复习计划 Markdown 全文；即使没有改动也要原样返回全文，不得省略或用“略”代替）
+{COURSE_PROMPT_DELIMITER}
+（修订后的完整课程总 Prompt Markdown 全文；即使没有改动也要原样返回全文）
+
+修订约束：
+1. 保持逐日结构（### 第N天）和一级/二级章节标题不变，除非诉求明确要求增删天数或章节；
+2. 只能使用课程资料、用户设置与当前草稿中已有的事实，不得编造知识点、题型或出处；
+3. 每日学习块总分钟数仍应落在用户每日可用时间的 90%-100%，除非诉求明确要求改变总量；
+4. 诉求只涉及其中一份草稿时，另一份原样返回全文；
+5. 诉求含义不清时，在 REPLY 段提出澄清问题，两份草稿仍各返回当前全文，不得自行臆测改写。
+"""
+
+
+def _split_revision_output(raw: str) -> tuple[str, str, str]:
+    """把模型输出切成 reply / reviewPlan / coursePrompt 三段；缺段或空段抛 ValueError。"""
+    reply_marker = raw.find(REPLY_DELIMITER)
+    plan_marker = raw.find(REVIEW_PLAN_DELIMITER)
+    prompt_marker = raw.find(COURSE_PROMPT_DELIMITER)
+    if reply_marker < 0 or plan_marker < 0 or prompt_marker < 0 or not (reply_marker < plan_marker < prompt_marker):
+        raise ValueError("模型输出缺少修订定界标记")
+    reply = raw[reply_marker + len(REPLY_DELIMITER):plan_marker].strip()
+    review_plan = raw[plan_marker + len(REVIEW_PLAN_DELIMITER):prompt_marker].strip()
+    course_prompt = raw[prompt_marker + len(COURSE_PROMPT_DELIMITER):].strip()
+    if not reply or not review_plan or not course_prompt:
+        raise ValueError("模型输出的修订内容不完整")
+    return reply, review_plan, course_prompt
+
+
+def revise_strategy_draft(
+    course_id: str,
+    message: str,
+    history: list[dict[str, Any]],
+    review_plan: str,
+    course_prompt: str,
+    *,
+    owner_id: str = "",
+):
+    """流式修订策略草稿，yield SSE 文本块。纯草稿变换：不写 workspace、不写对话记忆。
+
+    事件：token（reply 段的打字机增量）/ done（{reply, reviewPlan, coursePrompt}）/ error。
+    模型输出不合规时只发 error，绝不返回半份草稿。
+    """
+    load_workspace(course_id, refresh_materials=False)  # 课程不存在 → FileNotFoundError（路由层转 404）
+    _validate_strategy_content("reviewPlan", review_plan)
+    _validate_strategy_content("coursePrompt", course_prompt)
+
+    user_content = (
+        f"【当前复习计划草稿】\n{review_plan.strip()}\n\n"
+        f"【当前课程总 Prompt 草稿】\n{course_prompt.strip()}\n\n"
+        f"【修改诉求】\n{message.strip()}"
+    )
+    messages = build_model_messages(
+        STRATEGY_REVISION_TASK_PROMPT,
+        user_content,
+        user_profile_prompt=get_user_profile_prompt(owner_id)["content"],
+    )
+    # build_model_messages 已把 user_content 作为末条 user 消息；会话内 history 插到它前面
+    final_message = messages.pop()
+    for turn in history:
+        role = str(turn.get("role", ""))
+        content = str(turn.get("content", "")).strip()
+        if role in {"user", "assistant"} and content:
+            messages.append({"role": role, "content": content})
+    messages.append(final_message)
+
+    raw_parts: list[str] = []
+    sent_reply_chars = 0  # 已转发进打字机的 reply 段字符数
+    try:
+        for kind, payload in _stream_model_turn(messages, []):
+            if kind != "token" or not isinstance(payload, str) or not payload:
+                continue
+            raw_parts.append(payload)
+            current = "".join(raw_parts)
+            # 打字机只转发 reply 段（去掉开头的 <<<REPLY>>> 标记行）；草稿全文不进打字机
+            reply_end = current.find(REVIEW_PLAN_DELIMITER)
+            visible = current if reply_end < 0 else current[:reply_end]
+            stripped = visible.lstrip()
+            if stripped.startswith(REPLY_DELIMITER):
+                visible_reply = stripped[len(REPLY_DELIMITER):]
+            else:
+                # 标记可能只流到一半：尾部预留一个标记长度的缓冲，避免把半个标记打进打字机
+                visible_reply = visible[: max(0, len(visible) - len(REPLY_DELIMITER))]
+            if len(visible_reply) > sent_reply_chars:
+                yield _sse("token", {"text": visible_reply[sent_reply_chars:]})
+                sent_reply_chars = len(visible_reply)
+    except Exception as error:
+        yield _sse("error", {"message": f"策略修订暂时失败：{error}"})
+        return
+
+    try:
+        reply, new_plan, new_prompt = _split_revision_output("".join(raw_parts))
+        _validate_strategy_content("reviewPlan", new_plan)
+        _validate_strategy_content("coursePrompt", new_prompt)
+    except ValueError as error:
+        yield _sse("error", {"message": f"本次修订结果不完整，请换个说法再试：{error}"})
+        return
+
+    yield _sse(
+        "done",
+        {"reply": reply, "reviewPlan": new_plan, "coursePrompt": new_prompt},
+    )
+
+
 def _sanitize_custom_workspace(candidate: dict[str, Any], base: dict[str, Any], materials: list[dict[str, Any]]) -> dict[str, Any]:
     workspace = {**base}
-    course_id = str(base.get("course", {}).get("id") or DEFAULT_COURSE_ID)
-    for key in ("assessmentProfile", "diagnostic", "knowledgePoints", "tasks", "practiceQuestions", "mockQuestions", "modules"):
+    course_id = str(base.get("course", {}).get("id"))
+    for key in ("assessmentProfile", "knowledgePoints", "tasks", "practiceQuestions", "mockQuestions", "modules"):
         if candidate.get(key):
             workspace[key] = candidate[key]
 
@@ -3413,10 +2679,46 @@ def _sanitize_custom_workspace(candidate: dict[str, Any], base: dict[str, Any], 
             normalized_questions.append(question)
         workspace[question_key] = normalized_questions
 
-    _mark_material_memory(workspace, materials, change_note="已根据摸底结果初始化复习主线")
+    _mark_material_memory(workspace, materials, change_note="已根据课程资料和用户目标初始化复习主线")
     workspace["generatedAt"] = datetime.now().isoformat(timespec="seconds")
     workspace["generationMode"] = "ai"
     workspace["workspaceContentVersion"] = WORKSPACE_CONTENT_VERSION
+    return workspace
+
+
+def _merge_repaired_content(base: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+    """Merge generated content into missing tasks without altering the persisted plan."""
+    workspace = {**base}
+    repaired_by_id = {
+        str(task.get("id")): task
+        for task in candidate.get("tasks", [])
+        if isinstance(task, dict) and task.get("id")
+    }
+    merged_tasks: list[dict[str, Any]] = []
+    for existing in base.get("tasks", []):
+        if not isinstance(existing, dict):
+            continue
+        task = dict(existing)
+        repaired = repaired_by_id.get(str(task.get("id", "")))
+        if repaired and not isinstance(task.get("studyGuide"), dict) and isinstance(repaired.get("studyGuide"), dict):
+            task["studyGuide"] = repaired["studyGuide"]
+            if repaired.get("contentQualityWarning"):
+                task["contentQualityWarning"] = repaired["contentQualityWarning"]
+            else:
+                task.pop("contentQualityWarning", None)
+        merged_tasks.append(task)
+    workspace["tasks"] = merged_tasks
+
+    existing_questions = [question for question in base.get("practiceQuestions", []) if isinstance(question, dict)]
+    existing_ids = {str(question.get("id")) for question in existing_questions}
+    for question in candidate.get("practiceQuestions", []):
+        if isinstance(question, dict) and str(question.get("id")) not in existing_ids:
+            existing_questions.append(question)
+            existing_ids.add(str(question.get("id")))
+    workspace["practiceQuestions"] = existing_questions
+    generated_mock = candidate.get("mockQuestions")
+    if isinstance(generated_mock, list) and generated_mock:
+        workspace["mockQuestions"] = generated_mock
     return workspace
 
 
@@ -3429,7 +2731,7 @@ def _write_content_plan_preview(
     workspace = load_workspace(course_id, refresh_materials=False)
     workspace["course"] = {**workspace.get("course", base.get("course", {})), "id": course_id}
     workspace["onboarding"] = {**workspace.get("onboarding", base.get("onboarding", {})), "status": "planned"}
-    for key in ("assessmentProfile", "diagnostic", "knowledgePoints"):
+    for key in ("assessmentProfile", "knowledgePoints", "modules"):
         if candidate.get(key):
             workspace[key] = candidate[key]
     normalized_tasks: list[dict[str, Any]] = []
@@ -3465,6 +2767,7 @@ def _write_content_plan_preview(
                     int(onboarding_cfg.get("reviewCount") or 0),
                 ),
                 daily_minutes=round(float(onboarding_cfg.get("dailyHours") or 0) * 60) or 120,
+                modules=candidate.get("modules") if isinstance(candidate.get("modules"), list) else None,
             )
         )
     else:
@@ -3527,7 +2830,7 @@ def _write_content_lesson_preview(
 
 def submit_course_diagnostic(
     answers: dict[str, int],
-    course_id: str = DEFAULT_COURSE_ID,
+    course_id: str,
 ) -> dict[str, Any]:
     workspace = load_workspace(course_id, refresh_materials=False)
     questions = workspace.get("diagnosticQuestions", [])
@@ -3549,7 +2852,6 @@ def submit_course_diagnostic(
             return "不会"
         return str(options[answer_index])
 
-    diagnostic_wrong_answers: list[dict[str, Any]] = []
     for question in questions:
         selected = int(answers.get(question["id"], -1))
         answer_index = int(question.get("answerIndex", -1))
@@ -3560,20 +2862,6 @@ def submit_course_diagnostic(
             earned += int(question.get("score", 0))
         else:
             wrong_topics.append(str(question.get("knowledgePointId", "未知知识点")))
-            diagnostic_wrong_answers.append(
-                {
-                    "id": f"diagnostic-{question['id']}",
-                    "questionId": str(question["id"]),
-                    "questionType": "摸底测试",
-                    "source": str(question.get("source") or "课程资料库"),
-                    "addedAt": datetime.now().isoformat(timespec="seconds"),
-                    "title": question.get("prompt", "摸底错题"),
-                    "tag": str(question.get("source") or question.get("knowledgePointId") or "摸底测试"),
-                    "mistakeType": f"摸底失分：你选了「{selected_label}」，正确答案是「{correct_label}」。{question.get('explanation', '')}",
-                    "count": 1,
-                    "isReviewed": False,
-                }
-            )
         result_lines.append(
             f"- {question.get('prompt')}：{'正确' if correct else '错误'}；作答：{selected_label}；正确答案：{correct_label}；解析：{question.get('explanation', '')}"
         )
@@ -3584,7 +2872,7 @@ def submit_course_diagnostic(
     estimated_high = min(99, estimated_low + 8)
     workspace["diagnostic"] = {
         "estimatedScore": f"{estimated_low}-{estimated_high} 分",
-        "message": f"摸底得分 {earned}/{total}，目标 {target_score}+；系统将优先安排失分知识点：{', '.join(wrong_topics[:4]) or '暂无明显失分点'}。",
+        "message": f"摸底得分 {earned}/{total}，目标 {target_score}+。本结果仅供你感受课程题目与当前作答状态，不参与复习策略或后续课程生成。",
     }
     workspace["onboarding"] = {
         **workspace.get("onboarding", {}),
@@ -3594,13 +2882,16 @@ def submit_course_diagnostic(
         "diagnosticPercent": diagnostic_percent,
         "diagnosticSubmittedAt": datetime.now().isoformat(timespec="seconds"),
     }
-    if diagnostic_wrong_answers:
-        diagnostic_wrong_answer_ids = {item["id"] for item in diagnostic_wrong_answers}
-        workspace["wrongAnswers"] = diagnostic_wrong_answers + [
-            item
-            for item in workspace.get("wrongAnswers", [])
-            if not isinstance(item, dict) or item.get("id") not in diagnostic_wrong_answer_ids
-        ]
+    workspace["wrongAnswers"] = [
+        item for item in workspace.get("wrongAnswers", [])
+        if not (
+            isinstance(item, dict)
+            and (
+                str(item.get("id", "")).startswith("diagnostic-")
+                or str(item.get("questionType", "")) == "摸底测试"
+            )
+        )
+    ]
     workspace["diagnosticAnswers"] = {str(key): int(value) for key, value in answers.items()}
     workspace["diagnosticResults"] = result_lines
     _clear_pre_plan_content(workspace)
@@ -3629,22 +2920,20 @@ def _approve_strategy_documents_legacy(
     materials = scan_course_materials(course_id)
     context = _source_context(materials, course_id)
     onboarding_json = json.dumps(workspace.get("onboarding", {}), ensure_ascii=False, indent=2)
-    diagnostic_json = "\n".join(str(item) for item in workspace.get("diagnosticResults", []))
     task_prompt = """
-根据已确认的复习计划、课程总 Prompt、课程资料、用户目标和摸底结果，初始化完整复习工作台。只能依据所给内容，不要编造不存在的章节。
+根据已确认的复习计划、课程总 Prompt、课程资料和用户目标，初始化完整复习工作台。摸底测试仅供用户体验题目，不得影响课程结构、内容深度、题量或练习安排。只能依据所给内容，不要编造不存在的章节。
 请仅返回 JSON 对象：
 {
   "assessmentProfile":{"summary":"...","questionTypes":["..."]},
-  "diagnostic":{"estimatedScore":"...","message":"..."},
-  "modules":[{"id":"英文短横线 id","title":"按学科主题的模块名（如 力学/电磁学/资金时间价值），禁止照搬资料文件名或资料自带章节","order":1}],
+  "modules":[{"id":"英文短横线 id","title":"按学科主题命名的标准模块（应来自当前课程资料或教学大纲），禁止照搬资料文件名或资料自带章节","order":1}],
   "knowledgePoints":[{"id":"英文短横线 id","name":"...","mastery":0-100,"weight":1-30,"difficulty":1-5,"prerequisites":["其他知识点id，仅当存在真实学习先后依赖时才填，禁止填自身、编造id或形成环"],"summary":"用简短一两句话描述该知识点的关键知识，不要罗列资料出处","source":"...","moduleId":"必须命中 modules 中的某个 id"}],
   "tasks":[{"id":"英文短横线 id","courseId":"课程 id","day":1-14,"order":1,"title":"...","description":"...","source":"内部依据，不在界面展示","duration":整数分钟,"progress":0,"weight":1-30,"knowledgePointId":"...","status":"pending","priority":"high|medium|low","studyGuide":{"objectives":["..."],"concepts":[{"title":"...","body":"...","formula":"..."}],"example":{"title":"...","setup":"...","steps":["..."],"conclusion":"..."},"checklist":["..."]}}],
   "practiceQuestions":[{"id":"英文短横线 id","type":"single","score":5,"prompt":"...","options":["...","...","...","..."],"answerIndex":0-3,"explanation":"...","knowledgePointId":"...","source":"..."}],
   "mockQuestions":[{"id":"英文短横线 id","type":"single","questionType":"单项选择题","score":5-15,"prompt":"...","options":["...","...","...","..."],"answerIndex":0-3,"explanation":"...","knowledgePointId":"...","source":"..."},{"id":"英文短横线 id","type":"calculation","questionType":"计算题","score":10-30,"prompt":"完整计算题题干","referenceAnswer":"参考答案和关键计算过程","gradingRubric":["评分点"],"explanation":"详细解析","knowledgePointId":"...","source":"..."}]
 }
-规则：任务覆盖用户填写的复习天数和每日时间；练习偏向摸底错误知识点；模拟卷必须先仿照上传资料中的模拟卷/样卷/真题结构，没有样卷时再按用户填写的考试形式和备注编排题型、题量与分值比例，例如“选择30分计算题70分”就按 30/70 组织；计算题、综合题、简答题必须返回 type="calculation" 且包含 referenceAnswer 和 gradingRubric，不能压成选择题；任务内容必须服从已确认复习计划。source 字段仅作为内部元数据，标题、描述、讲义、例题、自测解析等用户可见内容不要写“来源、出处、资料依据、参考”。
+规则：任务覆盖用户填写的复习天数和每日时间；练习依据课程资料、考试要求和已确认复习计划安排；模拟卷必须先仿照上传资料中的模拟卷/样卷/真题结构，没有样卷时再按用户填写的考试形式和备注编排题型、题量与分值比例，例如“选择30分计算题70分”就按 30/70 组织；计算题、综合题、简答题必须返回 type="calculation" 且包含 referenceAnswer 和 gradingRubric，不能压成选择题；任务内容必须服从已确认复习计划。source 字段仅作为内部元数据，标题、描述、讲义、例题、自测解析等用户可见内容不要写“来源、出处、资料依据、参考”。
 modules 代表课程的几大知识模块（通常 4-8 个），必须按这门课在教科书/教学大纲中的标准章节主题划分（如操作系统 → 内存管理/进程管理/文件系统管理/输入输出设备管理；物理学 → 力学/热学/电磁学/光学）：每个标准章节独立成模块，模块内再拆小节知识点；不要把「基础概念」「综合应用」这类学习阶段当模块，也不要把多个标准章节拼成混合模块（如「I/O 与文件系统」应拆成「文件系统管理」「输入输出设备管理」两章）；模块顺序遵循教材标准讲授主线，「跨章节综合/冲刺」类内容可保留为最末一个模块；用户指定过模块划分或顺序时以用户为准。上传资料仅作学习素材，严禁把资料文件名或资料自带的章节划分直接搬进 modules，也不得把每个知识点各列一章。每个 knowledgePoint 必须通过 moduleId 归到且仅归到一个 module，moduleId 必须命中 modules 中已声明的某个 id。
-knowledgePoints 的 difficulty 表示学习难度（1 最简单、5 最难，依据资料的抽象程度和计算复杂度判断）；prerequisites 只填真实存在的学习先后依赖（如先「资金时间价值」后「方案比选」），无依赖就不要填；tasks 的 day 与 order 仍按每日时间预算正常编排，系统会基于依赖关系统一重排复习顺序。
+knowledgePoints 的 difficulty 表示学习难度（1 最简单、5 最难，依据资料的抽象程度和计算复杂度判断）；prerequisites 只填真实存在的学习先后依赖（如先学习基础定义，再学习依赖它的综合应用），无依赖就不要填；tasks 的 day 与 order 仍按每日时间预算正常编排，系统会基于依赖关系统一重排复习顺序。
 """
     try:
         candidate = _extract_json(
@@ -3652,7 +2941,7 @@ knowledgePoints 的 difficulty 表示学习难度（1 最简单、5 最难，依
                 build_model_messages(
                     task_prompt,
                     (
-                        f"【用户设置】\n{onboarding_json}\n\n【摸底结果】\n{diagnostic_json}"
+                        f"【用户设置】\n{onboarding_json}"
                         f"\n\n【已确认复习计划】\n{review_plan}\n\n{context}"
                     ),
                     course_prompt=course_prompt,
@@ -3681,19 +2970,60 @@ def approve_strategy_documents(
     *,
     expected_review_plan_version: int,
     expected_course_prompt_version: int,
+    repair_only: bool = False,
+    generation_mode: str = "all",
+    lesson_limit: int | None = None,
+    continue_generation: bool = False,
+    wait_for_generation_lock: bool = False,
+    job_id: str = "",
 ) -> dict[str, Any]:
+    """Generate the mainline, or fill only missing lesson content in repair mode.
+
+    repair_only is deliberately non-destructive: the existing task plan, stable task
+    ids, progress fields, study guides, question history, and plan start date remain
+    authoritative. Only tasks without a studyGuide are sent through generation.
+
+    Background jobs may wait for another content generator (for example an automatic
+    mock-paper repair) to release the per-course lock. Interactive legacy calls still
+    fail fast, so an accidental duplicate HTTP request cannot occupy a request worker.
+    """
+    if generation_mode not in {"incremental", "all"}:
+        raise ValueError("不支持的内容生成模式")
+    if lesson_limit is not None and (isinstance(lesson_limit, bool) or lesson_limit < 1):
+        raise ValueError("每批生成课数必须大于等于 1")
+    if generation_mode == "all":
+        lesson_limit = None
+
     generation_lock = _content_generation_lock(course_id)
-    if not generation_lock.acquire(blocking=False):
-        raise RuntimeError("当前课程已有复习主线生成任务正在运行，请等待它结束后再点击生成。")
+    lock_acquired = (
+        generation_lock.acquire(timeout=30 * 60)
+        if wait_for_generation_lock
+        else generation_lock.acquire(blocking=False)
+    )
+    if not lock_acquired:
+        raise RuntimeError("当前课程已有内容生成任务正在运行，请稍后重试。")
     try:
-        save_strategy_documents(
-            course_id,
-            review_plan,
-            course_prompt,
-            expected_review_plan_version=expected_review_plan_version,
-            expected_course_prompt_version=expected_course_prompt_version,
-        )
-        workspace = load_workspace(course_id, refresh_materials=False)
+        if repair_only or continue_generation:
+            # 修复和继续生成只消费已经批准的文档，不应再次写入并提升版本。
+            # 否则一次中途失败就会让后台任务携带的版本立即过期，后续点击修复
+            # 只能得到“复习计划已被更新”，无法继续复用课程检查点。
+            workspace = load_workspace(course_id, refresh_materials=False)
+            strategy_documents = workspace.get("strategyDocuments", {})
+            if int(strategy_documents.get("reviewPlan", {}).get("version", 0)) != expected_review_plan_version:
+                raise RuntimeError("复习计划已被更新，请刷新后重试")
+            if int(strategy_documents.get("coursePrompt", {}).get("version", 0)) != expected_course_prompt_version:
+                raise RuntimeError("课程总 Prompt 已被更新，请刷新后重试")
+            _validate_strategy_content("reviewPlan", review_plan)
+            _validate_strategy_content("coursePrompt", course_prompt)
+        else:
+            save_strategy_documents(
+                course_id,
+                review_plan,
+                course_prompt,
+                expected_review_plan_version=expected_review_plan_version,
+                expected_course_prompt_version=expected_course_prompt_version,
+            )
+            workspace = load_workspace(course_id, refresh_materials=False)
         materials = scan_course_materials(course_id)
         try:
             sync_course_knowledge(course_id, workspace)
@@ -3716,43 +3046,87 @@ def approve_strategy_documents(
                         str(update.get("runId", "")),
                     )
 
+            from .course_feedback_service import append_course_feedback_rules
+
+            effective_course_prompt = append_course_feedback_rules(course_id, course_prompt)
             result = run_content_workflow(
                 course_id,
                 workspace,
                 review_plan,
-                course_prompt,
+                effective_course_prompt,
                 evidence_context,
                 _model_json,
                 on_progress=publish_content_progress,
+                repair_only=repair_only,
+                lesson_limit=lesson_limit,
+                use_existing_plan=repair_only or continue_generation,
+                should_cancel=(lambda: is_agent_job_cancelled(job_id)) if job_id else None,
             )
-            workspace = _sanitize_custom_workspace(result["candidate"], workspace, materials)
+            if repair_only or continue_generation:
+                # Incremental generation can run while the learner keeps studying.
+                # Merge into the newest persisted workspace so progress recorded
+                # during generation is never overwritten by the stale start copy.
+                latest_workspace = load_workspace(course_id, refresh_materials=False)
+                workspace = _merge_repaired_content(latest_workspace, result["candidate"])
+            else:
+                workspace = _sanitize_custom_workspace(result["candidate"], workspace, materials)
+        except AgentJobCancelled:
+            # 已完整发布的上一节保留；当前模型响应及其半成品检查点由 workflow 丢弃。
+            # 用户主动结束不是生成故障，不污染 maintenanceError/generationWarning。
+            raise
         except Exception as error:
             workspace = load_workspace(course_id, refresh_materials=False)
             workspace["generationWarning"] = str(error)
-            workspace["onboarding"] = {**workspace.get("onboarding", {}), "status": "strategy-review"}
             strategy_documents = workspace.setdefault("strategyDocuments", {})
-            strategy_documents["status"] = "review"
+            if not (repair_only or continue_generation):
+                workspace["onboarding"] = {**workspace.get("onboarding", {}), "status": "strategy-review"}
+                strategy_documents["status"] = "review"
             strategy_documents["maintenanceError"] = str(error)
             save_workspace(workspace, course_id)
             raise RuntimeError(f"多 Agent 复习主线生成失败：{error}") from error
 
         workspace["course"] = {**workspace.get("course", {}), "id": course_id}
         workspace["onboarding"] = {**workspace.get("onboarding", {}), "status": "planned"}
-        workspace["planStartDate"] = datetime.now().date().isoformat()
+        workspace["readabilityReview"] = build_course_readability_review(
+            [task for task in workspace.get("tasks", []) if isinstance(task, dict)],
+            str(workspace.get("onboarding", {}).get("contentStyle") or "standard"),
+        )
+        if not (repair_only or continue_generation) or not workspace.get("planStartDate"):
+            workspace["planStartDate"] = datetime.now().date().isoformat()
         strategy_documents = workspace.setdefault("strategyDocuments", {})
         strategy_documents["status"] = "approved"
         strategy_documents["maintenancePending"] = False
         strategy_documents["maintenanceError"] = ""
         strategy_documents["lastAgentRunId"] = result["runId"]
         strategy_documents["reviewReport"] = result["reviewReport"]
-        workspace["generationWarning"] = ""
+        pending_count = int(result.get("pendingLessonCount", 0))
+        workspace["generationWarning"] = (f"还有 {pending_count} 课待生成。" if pending_count else "")
         save_workspace(workspace, course_id)
-        # 复习主线落盘后异步刷新术语词条（幂等 job，资料未变时秒回）
-        try:
-            enqueue_agent_job(course_id, "glossary_refresh", {"event": "复习主线生成完成"}, max_attempts=2)
-        except Exception:
-            pass  # 术语刷新失败不影响主线生成结果
+        # 全部课程完成后再刷新术语，避免逐课模式每批重复入队。
+        if pending_count == 0:
+            try:
+                enqueue_agent_job(course_id, "glossary_refresh", {"event": "复习主线生成完成"}, max_attempts=2)
+            except Exception:
+                pass  # 术语刷新失败不影响主线生成结果
         return workspace
+    finally:
+        generation_lock.release()
+
+
+def review_course_readability(course_id: str) -> dict[str, Any]:
+    """Re-audit generated lessons without changing teaching facts or answers."""
+    generation_lock = _content_generation_lock(course_id)
+    if not generation_lock.acquire(blocking=False):
+        raise RuntimeError("当前课程仍在生成内容，请等待生成结束后再审核排版。")
+    try:
+        with _workspace_lock(course_id):
+            workspace = load_workspace(course_id, refresh_materials=False)
+            workspace["readabilityReview"] = build_course_readability_review(
+                [task for task in workspace.get("tasks", []) if isinstance(task, dict)],
+                str(workspace.get("onboarding", {}).get("contentStyle") or "standard"),
+            )
+            save_workspace(workspace, course_id)
+            return workspace
     finally:
         generation_lock.release()
 
@@ -3783,7 +3157,6 @@ def ensure_orientation_task(course_id: str, *, force: bool = False) -> dict[str,
         modules=workspace.get("modules", []),
         knowledge_points=workspace.get("knowledgePoints", []),
         tasks=[t for t in tasks if not study_scheduler.is_orientation(t)],
-        diagnostic=workspace.get("diagnostic", {}),
         assessment_profile=workspace.get("assessmentProfile", {}),
     )
     orientation_task = _make_orientation_task(course_id, guide)
@@ -4001,6 +3374,7 @@ def record_time(
     minutes: int,
     target_date: str | None = None,
     note: str = "",
+    client_entry_id: str | None = None,
 ) -> dict[str, Any]:
     if minutes <= 0 or minutes > 24 * 60:
         raise ValueError("学习时长必须在 1-1440 分钟之间")
@@ -4009,8 +3383,16 @@ def record_time(
     if not isinstance(entries, list):
         entries = []
         workspace["timeLog"] = entries
+    normalized_client_entry_id = (client_entry_id or "").strip()
+    if normalized_client_entry_id:
+        existing_entry = next(
+            (entry for entry in entries if isinstance(entry, dict) and entry.get("id") == normalized_client_entry_id),
+            None,
+        )
+        if existing_entry is not None:
+            return {"entry": existing_entry, "dailyProgress": build_daily_progress(workspace)}
     entry = {
-        "id": f"log-{int(datetime.now().timestamp() * 1000)}",
+        "id": normalized_client_entry_id or f"log-{int(datetime.now().timestamp() * 1000)}",
         "taskId": (task_id or "").strip(),
         "date": (target_date or datetime.now().date().isoformat()),
         "minutes": int(minutes),
@@ -4275,102 +3657,6 @@ operations 至少 1 条；确实无需调整时返回 operations=[]。
     return proposal
 
 
-def _sanitize_generated_workspace(candidate: dict[str, Any], materials: list[dict[str, Any]]) -> dict[str, Any]:
-    fallback = _fallback_workspace(materials)
-    for key in ("assessmentProfile", "diagnostic", "knowledgePoints", "tasks", "practiceQuestions", "mockQuestions"):
-        if candidate.get(key):
-            fallback[key] = candidate[key]
-
-    filtered_tasks = [
-        task
-        for task in fallback["tasks"]
-        if isinstance(task, dict)
-        and int(task.get("day", 0)) in (1, 2, 3)
-        and int(task.get("duration", 0)) > 0
-    ]
-    bootstrap_points = [
-        point
-        for point in fallback.get("knowledgePoints", [])
-        if isinstance(point, dict)
-    ]
-    bootstrap_warnings = study_scheduler.sanitize_dependencies(bootstrap_points)
-    bootstrap_kp_order = study_scheduler.topological_rank(bootstrap_points)
-    normalized_tasks: list[dict[str, Any]] = []
-    for day in (1, 2, 3):
-        day_tasks = [task for task in filtered_tasks if int(task["day"]) == day][:2]
-        if len(day_tasks) != 2:
-            return _fallback_workspace(materials)
-        # 每日组内按知识点拓扑序排（bootstrap 保持每天 2 任务/合计 120 分钟的硬约束）。
-        day_tasks.sort(
-            key=lambda task: bootstrap_kp_order.get(str(task.get("knowledgePointId") or ""), 9999)
-        )
-        day_total = sum(int(task["duration"]) for task in day_tasks)
-        if day_total != 120:
-            day_tasks[-1]["duration"] = max(30, int(day_tasks[-1]["duration"]) + (120 - day_total))
-        normalized_tasks.extend(day_tasks)
-
-    for order, task in enumerate(normalized_tasks, start=1):
-        task["courseId"] = "engineering-economics"
-        task["order"] = order
-        task["progress"] = 0
-        task["status"] = "pending"
-    fallback["tasks"] = normalized_tasks
-    fallback["schedulingWarnings"] = bootstrap_warnings
-    fallback["practiceQuestions"] = fallback["practiceQuestions"][:6]
-    if not fallback.get("mockQuestions"):
-        fallback["mockQuestions"] = _fallback_mock_questions()
-    fallback["course"]["progress"] = 0
-    _mark_material_memory(fallback, materials)
-    fallback["generatedAt"] = datetime.now().isoformat(timespec="seconds")
-    fallback["generationMode"] = "ai"
-    _ensure_workspace_content_quality(fallback)
-    return fallback
-
-
-def bootstrap_engineering_workspace(force: bool = False) -> dict[str, Any]:
-    if _workspace_path(DEFAULT_COURSE_ID).exists() and not force:
-        return load_workspace()
-
-    materials = scan_course_materials()
-    context = _source_context(materials)
-    prompt = """
-你是大学《工程经济学》期末冲刺学习规划 Agent。只能依据资料上下文生成内容，避免编造不存在的章节、题型或出处。
-目标：3 天，每天 2 小时，总计 360 分钟，目标分数 80+。
-请仅返回 JSON 对象，不要 Markdown。JSON 字段必须严格为：
-{
-  "assessmentProfile":{"summary":"...","questionTypes":["..."]},
-  "diagnostic":{"estimatedScore":"...","message":"..."},
-  "modules":[{"id":"英文短横线 id","title":"按学科主题的模块名（如 力学/电磁学/资金时间价值），禁止照搬资料文件名或资料自带章节","order":1}],
-  "knowledgePoints":[{"id":"英文短横线 id","name":"...","mastery":0-100,"weight":1-30,"difficulty":1-5,"prerequisites":["其他知识点id，仅当存在真实学习先后依赖时才填，禁止填自身、编造id或形成环"],"summary":"用简短一两句话描述该知识点的关键知识，不要罗列资料出处","source":"...","moduleId":"必须命中 modules 中的某个 id"}],
-  "tasks":[{"id":"英文短横线 id","courseId":"engineering-economics","day":1-3,"order":1-3,"title":"...","description":"...","source":"内部依据，不在界面展示","duration":整数分钟,"progress":0,"weight":1-30,"knowledgePointId":"对应知识点 id","status":"pending","priority":"high|medium|low","studyGuide":{"objectives":["..."],"concepts":[{"title":"...","body":"...","formula":"..."}],"example":{"title":"...","setup":"...","steps":["..."],"conclusion":"..."},"checklist":["..."]}}],
-  "practiceQuestions":[{"id":"英文短横线 id","type":"single","score":5,"prompt":"...","options":["...","...","...","..."],"answerIndex":0-3,"explanation":"...","knowledgePointId":"...","source":"..."}],
-  "mockQuestions":[选择题用 type="single" 且包含 options/answerIndex；计算题用 type="calculation" 且包含 referenceAnswer/gradingRubric，分值与题量按模拟卷或用户说明动态决定]
-}
-规则：给出 5 个知识点、6 个任务（每天恰好 2 个任务且当日 duration 合计 120）、6 道练习题和一套完整模拟题。
-每个任务的 studyGuide 是“速成讲解正文”，不能只写提纲；至少包含 4 个目标、4 个概念讲解、1 道完整例题和 4 条考前检查。讲解质量要接近课件：写出定义、适用条件、公式口径、易错点和考试判别步骤；用户可见内容不要展示来源、出处、资料依据或参考。
-模拟卷必须按完整考试感组织：优先仿照资料中的模拟卷/样卷/真题结构；没有样卷时再按资料和考试说明动态编排题型、题量和分值比例。选择题返回 type="single"、options 和 answerIndex；计算题/综合题返回 type="calculation"、referenceAnswer 和 gradingRubric，题干要要求写出计算过程、公式代入和最终答案，不能压成选择题。
-每题必须可由所给资料判断，解释必须清楚给出关键公式或结论。真题题型优先覆盖资金时间价值、税后现金流、回收期、NPV/IRR/NAV、多方案、盈亏平衡和 Excel 口径。
-modules 给出课程的几大知识模块（如「资金时间价值」「现金流与评价指标」「多方案经济评价」「不确定性分析」），必须按这门课在教科书/教学大纲中的标准章节主题划分：每个标准章节独立成模块，模块内再拆小节知识点；不要把「基础概念」「综合应用」这类学习阶段当模块，也不要把多个标准章节拼成混合模块；模块顺序遵循教材标准讲授主线，「跨章节综合/冲刺」类内容可保留为最末一个模块。上传资料仅作学习素材，严禁照搬资料文件名或资料自带的章节划分，也不得把每个知识点各列一章；每个 knowledgePoint 必须通过 moduleId 归到且仅归到一个 module，moduleId 必须命中 modules 中已声明的某个 id。
-knowledgePoints 的 difficulty 表示学习难度（1 最简单、5 最难，依据资料的抽象程度和计算复杂度判断）；prerequisites 只填真实存在的学习先后依赖（如先「资金时间价值」后「方案比选」），无依赖就不要填；tasks 的 day 与 order 仍按每日预算正常编排，系统会基于依赖关系统一重排复习顺序。
-"""
-    try:
-        generated = _extract_json(
-            _model_completion(
-                build_model_messages(prompt, context),
-                json_mode=True,
-            )
-        )
-        workspace = _sanitize_generated_workspace(generated, materials)
-    except Exception as error:
-        workspace = _fallback_workspace(materials)
-        _mark_material_memory(workspace, materials)
-        workspace["generatedAt"] = datetime.now().isoformat(timespec="seconds")
-        workspace["generationMode"] = "fallback"
-        workspace["generationWarning"] = str(error)
-        _ensure_workspace_content_quality(workspace)
-
-    save_workspace(workspace)
-    return workspace
 
 
 def _workspace_needs_material_refresh(workspace: dict[str, Any]) -> bool:
@@ -4383,8 +3669,42 @@ def _workspace_needs_material_refresh(workspace: dict[str, Any]) -> bool:
     )
 
 
+def update_course_material_role(
+    relative_path: str,
+    role: str,
+    course_id: str,
+    *,
+    priority_order: int | None = None,
+) -> dict[str, Any]:
+    normalized_role = _normalize_material_role(role)
+    workspace = load_workspace(course_id, refresh_materials=False)
+    materials = scan_course_materials(course_id, workspace=workspace)
+    if not any(str(item.get("relativePath")) == relative_path for item in materials):
+        raise FileNotFoundError(f"资料不存在：{relative_path}")
+    roles = _material_role_metadata(workspace)
+    if priority_order is None:
+        existing_order = roles.get(relative_path, {}).get("priorityOrder")
+        priority_order = int(existing_order or 0) or next(
+            (index for index, item in enumerate(materials, start=1) if str(item.get("relativePath")) == relative_path),
+            1,
+        )
+    roles[relative_path] = {"role": normalized_role, "priorityOrder": max(0, int(priority_order or 0))}
+    workspace["materialRoles"] = roles
+    _mark_material_memory(
+        workspace,
+        scan_course_materials(course_id, workspace=workspace),
+        change_note="资料主辅角色已更新",
+    )
+    try:
+        sync_course_knowledge(course_id, workspace)
+    except Exception as error:
+        workspace["knowledgeBase"] = {"status": "unavailable", "message": f"知识库索引更新失败：{error}"}
+    save_workspace(workspace, course_id)
+    return workspace
+
+
 def refresh_workspace_materials(
-    course_id: str = DEFAULT_COURSE_ID,
+    course_id: str,
     *,
     change_note: str | None = None,
     force_reparse: bool = False,
@@ -4392,7 +3712,7 @@ def refresh_workspace_materials(
     workspace = load_workspace(course_id, refresh_materials=False)
     _mark_material_memory(
         workspace,
-        scan_course_materials(course_id, force_reparse=force_reparse),
+        scan_course_materials(course_id, force_reparse=force_reparse, workspace=workspace),
         change_note=change_note,
     )
     if _workspace_is_planned(workspace):
@@ -4442,13 +3762,11 @@ def _reshuffle_unanswered_single_choice(workspace: dict[str, Any]) -> bool:
 
 
 def load_workspace(
-    course_id: str = DEFAULT_COURSE_ID,
+    course_id: str,
     *,
     refresh_materials: bool = True,
 ) -> dict[str, Any]:
     workspace_path = _workspace_path(course_id)
-    if not workspace_path.exists() and course_id == DEFAULT_COURSE_ID and LEGACY_WORKSPACE_PATH.exists():
-        _atomic_write_text(workspace_path, LEGACY_WORKSPACE_PATH.read_text(encoding="utf-8"))
     if not workspace_path.exists():
         raise FileNotFoundError("课程学习空间尚未初始化")
     workspace = json.loads(workspace_path.read_text(encoding="utf-8"))
@@ -4467,7 +3785,7 @@ def load_workspace(
         workspace["planStartDate"] = fallback_start or datetime.now().date().isoformat()
         changed = True
     if refresh_materials and _workspace_needs_material_refresh(workspace):
-        _mark_material_memory(workspace, scan_course_materials(course_id))
+        _mark_material_memory(workspace, scan_course_materials(course_id, workspace=workspace))
         changed = True
     elif not isinstance(workspace.get("materialMemory"), dict):
         _mark_material_memory(workspace, workspace.get("materials", []))
@@ -4503,7 +3821,10 @@ def save_workspace(
     course_id: str | None = None,
     expected_revision: int | None = None,
 ) -> None:
-    resolved_course_id = course_id or str(workspace.get("course", {}).get("id") or DEFAULT_COURSE_ID)
+    resolved_course_id = str(course_id or workspace.get("course", {}).get("id") or "")
+    if not resolved_course_id:
+        raise ValueError("保存课程学习空间必须提供 course_id")
+    resolved_course_id = _validate_course_id(resolved_course_id)
     workspace_path = _workspace_path(resolved_course_id)
     with _workspace_lock(resolved_course_id):
         current_revision = 0
@@ -4526,7 +3847,7 @@ def save_workspace(
         _atomic_write_text(workspace_path, json.dumps(workspace, ensure_ascii=False, indent=2))
 
 
-def load_mind_map(course_id: str = DEFAULT_COURSE_ID) -> dict[str, Any]:
+def load_mind_map(course_id: str) -> dict[str, Any]:
     _validate_course_id(course_id)
     load_workspace(course_id, refresh_materials=False)
     mind_map_path = _mind_map_path(course_id)
@@ -4538,7 +3859,7 @@ def load_mind_map(course_id: str = DEFAULT_COURSE_ID) -> dict[str, Any]:
     return mind_map
 
 
-def save_mind_map(mind_map: dict[str, Any], course_id: str = DEFAULT_COURSE_ID) -> dict[str, Any]:
+def save_mind_map(mind_map: dict[str, Any], course_id: str) -> dict[str, Any]:
     if not isinstance(mind_map, dict):
         raise ValueError("课程知识地图格式无效")
     _validate_course_id(course_id)
@@ -4697,7 +4018,7 @@ def _llm_regroup_modules(points: list[dict[str, Any]]) -> tuple[list[dict[str, A
 你是课程知识结构分析助手。把给定的知识点按学科语义归并成 4-8 个「模块/章节」，要求：
 - 模块划分采用学科标准章节架构：按这门课在教科书/教学大纲中的标准章节主题划分（如操作系统 → 内存管理/进程管理/文件系统管理/输入输出设备管理），每个标准章节独立成模块，模块内保留其小节知识点。
 - 不要把「基础概念」「综合应用」这类学习阶段当模块，也不要把多个标准章节拼成混合模块（如「I/O 与文件系统」应拆开）；「跨章节综合/冲刺」类内容可保留为最末一个模块。
-- 模块名必须贴合课程语境（如「力学」「电磁学」「资金时间价值」「图论」），不得使用「模块1/板块A」这类空泛占位名。
+- 模块名必须贴合课程语境（使用当前课程教材或教学大纲中的标准章节名称），不得使用「模块1/板块A」这类空泛占位名。
 - 同一主题的知识点归到同一模块；模块顺序遵循教材标准讲授主线。
 - 每个知识点必须归到且仅归到一个模块；moduleId 必须命中 modules 中已声明的某个 id。
 只返回 JSON：
@@ -4767,7 +4088,7 @@ def regroup_course_modules(course_id: str) -> dict[str, Any]:
     return generate_mind_map(course_id)
 
 
-def generate_mind_map(course_id: str = DEFAULT_COURSE_ID) -> dict[str, Any]:
+def generate_mind_map(course_id: str) -> dict[str, Any]:
     workspace = load_workspace(course_id, refresh_materials=False)
     previous_map: dict[str, Any] = {}
     try:
@@ -5067,7 +4388,7 @@ def _grade_mock_written_answer(
                 build_model_messages(
                     prompt,
                     json.dumps(payload, ensure_ascii=False, indent=2),
-                    course_prompt=get_course_prompt(str(workspace.get("course", {}).get("id") or DEFAULT_COURSE_ID)),
+                    course_prompt=get_course_prompt(str(workspace.get("course", {}).get("id"))),
                 ),
                 json_mode=True,
             )
@@ -5202,7 +4523,7 @@ def _ai_review_wrong_answer(
     *,
     mode: str,
 ) -> tuple[str, int]:
-    course_id = str(workspace.get("course", {}).get("id") or DEFAULT_COURSE_ID)
+    course_id = str(workspace.get("course", {}).get("id"))
     knowledge_point_id = str(question.get("knowledgePointId", ""))
     selected_label = _answer_label(question, answer_index)
     correct_label = _answer_label(question, int(question.get("answerIndex", -1)))
@@ -5340,8 +4661,8 @@ def _prioritize_tasks(workspace: dict[str, Any], knowledge_point_id: str, is_cor
 def submit_practice_answer(
     question_id: str,
     answer_index: int,
-    mode: str = "刷题练习",
-    course_id: str = DEFAULT_COURSE_ID,
+    mode: str,
+    course_id: str,
 ) -> dict[str, Any]:
     workspace = load_workspace(course_id)
     question = _find_question(workspace, question_id)
@@ -5396,7 +4717,7 @@ def submit_practice_answer(
 def submit_wrong_answer_retry(
     wrong_answer_id: str,
     answer_index: int,
-    course_id: str = DEFAULT_COURSE_ID,
+    course_id: str,
 ) -> dict[str, Any]:
     workspace = load_workspace(course_id)
     wrong_answer = next(
@@ -5472,9 +4793,69 @@ def _estimate_score(workspace: dict[str, Any]) -> str:
     return f"{low}-{high} 分"
 
 
+def repair_course_mock_questions(
+    course_id: str,
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Repair a missing/corrupt mock exam without regenerating the study plan.
+
+    Existing questions are preserved unless force=True. The final write uses the
+    workspace revision observed before the model call so concurrent learning updates
+    cannot be overwritten by a slow repair request.
+    """
+    generation_lock = _content_generation_lock(course_id)
+    if not generation_lock.acquire(blocking=False):
+        raise RuntimeError("当前课程已有内容生成任务正在运行，请等待它结束后再修复模拟卷。")
+    try:
+        workspace = load_workspace(course_id, refresh_materials=False)
+        if not _workspace_is_planned(workspace):
+            raise ValueError("请先完成摸底并生成复习主线，再生成模拟卷")
+        if not workspace.get("knowledgePoints"):
+            raise ValueError("课程尚无知识点，无法生成模拟卷")
+        existing = workspace.get("mockQuestions")
+        if not force and not mock_questions_need_repair(workspace):
+            return {
+                "workspace": workspace,
+                "repaired": False,
+                "source": "existing",
+                "warning": "",
+                "questionCount": len(existing),
+            }
+
+        expected_revision = int(workspace.get("revision", 0))
+        course_prompt = ""
+        try:
+            course_prompt = get_course_prompt(course_id)
+        except (FileNotFoundError, ValueError):
+            pass
+        result = repair_mock_questions(
+            course_id,
+            workspace,
+            _model_json,
+            course_prompt=course_prompt,
+        )
+        questions = result["mockQuestions"]
+        workspace["mockQuestions"] = questions
+        workspace["mockResult"] = None
+        workspace["mockQuestionsGeneratedAt"] = datetime.now().isoformat(timespec="seconds")
+        workspace["mockQuestionsGenerationSource"] = result["source"]
+        workspace["mockQuestionsGenerationWarning"] = result["warning"]
+        save_workspace(workspace, course_id, expected_revision=expected_revision)
+        return {
+            "workspace": workspace,
+            "repaired": True,
+            "source": result["source"],
+            "warning": result["warning"],
+            "questionCount": len(questions),
+        }
+    finally:
+        generation_lock.release()
+
+
 def submit_mock_answers(
     answers: dict[str, Any],
-    course_id: str = DEFAULT_COURSE_ID,
+    course_id: str,
 ) -> dict[str, Any]:
     workspace = load_workspace(course_id)
     questions = workspace.get("mockQuestions", [])
@@ -5560,7 +4941,7 @@ def submit_mock_answers(
     }
 
 
-def clear_practice_answer(question_id: str, course_id: str = DEFAULT_COURSE_ID) -> dict[str, Any]:
+def clear_practice_answer(question_id: str, course_id: str) -> dict[str, Any]:
     workspace = load_workspace(course_id, refresh_materials=False)
     practice_answers = workspace.get("practiceAnswers")
     if isinstance(practice_answers, dict) and practice_answers.pop(question_id, None) is not None:
@@ -5569,7 +4950,7 @@ def clear_practice_answer(question_id: str, course_id: str = DEFAULT_COURSE_ID) 
     return workspace
 
 
-def clear_mock_result(course_id: str = DEFAULT_COURSE_ID) -> dict[str, Any]:
+def clear_mock_result(course_id: str) -> dict[str, Any]:
     workspace = load_workspace(course_id, refresh_materials=False)
     workspace["mockResult"] = None
     save_workspace(workspace, course_id)
@@ -5581,7 +4962,7 @@ def update_workspace_state(
     tasks: list[dict[str, Any]] | None = None,
     wrong_answers: list[dict[str, Any]] | None = None,
     note: str | None = None,
-    course_id: str = DEFAULT_COURSE_ID,
+    course_id: str,
 ) -> dict[str, Any]:
     workspace = load_workspace(course_id, refresh_materials=False)
     previous_tasks = list(workspace.get("tasks", []))
@@ -5726,7 +5107,7 @@ def _maintain_rolling_summary(course_id: str, mode: str) -> None:
         return
 
 
-def _agent_chat_legacy(message: str, course_id: str = DEFAULT_COURSE_ID) -> dict[str, Any]:
+def _agent_chat_legacy(message: str, course_id: str) -> dict[str, Any]:
     workspace = load_workspace(course_id)
     onboarding = workspace.get("onboarding", {})
     course = workspace.get("course", {})
@@ -5982,7 +5363,7 @@ def _build_agent_messages(
 
 def agent_chat_stream(
     message: str,
-    course_id: str = DEFAULT_COURSE_ID,
+    course_id: str,
     *,
     mode: str = "chat",
     context: dict[str, Any] | None = None,
@@ -6121,7 +5502,7 @@ def agent_chat_stream(
 
 def agent_chat(
     message: str,
-    course_id: str = DEFAULT_COURSE_ID,
+    course_id: str,
     *,
     mode: str = "chat",
     context: dict[str, Any] | None = None,

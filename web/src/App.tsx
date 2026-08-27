@@ -10,6 +10,7 @@ import {
   useState,
 } from 'react'
 import {
+  ArchiveRestore,
   ArrowUp,
   BookOpen,
   Check,
@@ -18,6 +19,7 @@ import {
   FileText,
   GraduationCap,
   LoaderCircle,
+  LogOut,
   Moon,
   PanelRightOpen,
   Plus,
@@ -29,32 +31,44 @@ import {
 } from 'lucide-react'
 import {
   adjustCoursePlan,
+  applyCourseFeedbackRewrite,
+  applyGlobalCourseFeedback,
   applyCourseAdjustmentProposal,
   askCourseAgent,
   streamCourseAgent,
+  streamStrategyRevision,
   type AgentStreamHandle,
   approveStrategyDocumentsInBackground,
+  cancelAgentJob,
   clearCourseMockResult,
   clearCoursePracticeAnswer,
   createCourse,
   deleteCourse,
   deleteCourseMaterial,
+  updateCourseMaterialRole,
   deleteCourseTimeLog,
   deleteCourseWrongAnswer,
   dismissCourseAdjustmentProposal,
   generateStrategyDocuments,
   getAgentJob,
   getCourseWorkspace,
+  getAccountProfile,
   getStrategyDocuments,
   getRuntimeModel,
   listArchiveItems,
   listCourses,
+  permanentlyDeleteArchiveItem,
   recordCourseTimeLog,
+  repairCourseMockQuestions,
   rescanCourseMaterials,
+  reviewCourseReadability,
   restoreArchiveItem,
   searchCourse,
   saveCoursePrompt,
   saveCourseSetup,
+  refineCourseFeedbackRewrite,
+  submitCourseFeedback,
+  submitGlobalCourseFeedback,
   submitCourseDiagnostic,
   submitCourseMockAnswers,
   submitCoursePracticeAnswer,
@@ -62,33 +76,39 @@ import {
   toRuntimeModelProfile,
   updateCourseWorkspace,
   flushCourseWorkspaceNote,
+  flushCourseTimeLog,
   uploadCourseMaterials,
 } from './apiClient'
 import { AiCompanion } from './components/AiCompanion'
 import { MainNavigation } from './components/Sidebar'
 import { OptionWheel } from './components/OptionWheel'
 import { ModuleView } from './components/ModuleView'
-import { SelectionToNoteToolbar } from './components/SelectionToNoteToolbar'
+import { SelectionToNoteToolbar, type CourseFeedbackDraft } from './components/SelectionToNoteToolbar'
+import { NoteHighlightDismiss } from './components/NoteHighlightDismiss'
 import { TopbarCourseTimer } from './components/TopbarCourseTimer'
 import { CourseTimerProvider } from './hooks/useCourseTimer'
 import { GlossaryProvider } from './hooks/useGlossary'
-import { AUTH_EXPIRED_EVENT, getStoredUser, hasSession, logout, type AuthUser } from './auth'
+import { AUTH_EXPIRED_EVENT, getStoredUser, hasSession, logout, updateStoredUser, type AuthUser } from './auth'
 import { LoginPage } from './components/LoginPage'
 import { isDemoMode } from './apiClient'
 import { useSpecularButtons } from './hooks/useSpecularButtons'
 import { buildCourseTimeline, summarizeTimeline, COURSE_CATEGORY_TABS, type CourseTimelineCategory } from './utils/courseTimeline'
+import { restoreNoteHighlights, removeNoteHighlight, discardCourseNoteHighlights, type NoteHighlightHit } from './utils/noteHighlights'
 import type {
   AdjustmentProposal,
   AgentJob,
   ArchiveItem,
   Course,
   LearningModule,
+  Material,
   MockAnswer,
   ModelProfile,
   PlanParamsAdjustRequest,
   PlanTask,
   SearchResult,
   StreamingMessage,
+  StrategyGenerationRequest,
+  StrategyRevisionMessage,
   StudyWorkspace,
   UiFont,
   UiFontSize,
@@ -438,8 +458,9 @@ function createLocalCourseWorkspace(course: Course): StudyWorkspace {
 
 function App() {
   // 认证门（阶段1）：演示模式跳过；有会话才挂工作台，refresh 失效时回到登录页
-  const [authUser, setAuthUser] = useState<AuthUser | null>(() => (isDemoMode ? { id: 'demo', email: '', displayName: '演示', role: 'user' } : getStoredUser()))
+  const [authUser, setAuthUser] = useState<AuthUser | null>(() => (isDemoMode ? { id: 'demo', email: '', displayName: '演示', role: 'user', avatarUrl: '' } : getStoredUser()))
   const isAuthed = isDemoMode || (hasSession() && authUser !== null)
+  const finalizeCourseTimerRef = useRef<(() => Promise<void>) | null>(null)
 
   useEffect(() => {
     if (isDemoMode) return
@@ -450,7 +471,33 @@ function App() {
     return () => window.removeEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired)
   }, [])
 
+  useEffect(() => {
+    if (!isAuthed) return
+    let cancelled = false
+    void getAccountProfile()
+      .then((profile) => {
+        if (cancelled) return
+        const user: AuthUser = {
+          id: profile.id,
+          email: profile.email,
+          displayName: profile.displayName || profile.email,
+          role: profile.role,
+          avatarUrl: profile.avatarUrl,
+        }
+        setAuthUser(user)
+        if (!isDemoMode) updateStoredUser(user)
+      })
+      .catch(() => undefined)
+    return () => { cancelled = true }
+  }, [isAuthed])
+
+  function handleAuthUserChange(user: AuthUser) {
+    setAuthUser(user)
+    updateStoredUser(user)
+  }
+
   async function handleLogout() {
+    await finalizeCourseTimerRef.current?.().catch(() => undefined)
     await logout()
     setAuthUser(null)
     setWorkspace(null)
@@ -466,6 +513,7 @@ function App() {
   const [courseWorkspaces, setCourseWorkspaces] = useState<Record<string, StudyWorkspace>>({})
   const [activeModule, setActiveModule] = useState<LearningModule>('overview')
   const [activeStudyTaskId, setActiveStudyTaskId] = useState<string | null>(null)
+  const [activeStudySection, setActiveStudySection] = useState<{ index: number; id: string; label: string; title: string } | null>(null)
   const [streamingMessage, setStreamingMessage] = useState<StreamingMessage | null>(null)
   const streamHandleRef = useRef<AgentStreamHandle | null>(null)
   // token 到达往往远快于帧率：先攒进缓冲，rAF 时一次性合入 state，把流式重渲染压到每帧至多一次
@@ -500,12 +548,17 @@ function App() {
   const [proposal, setProposal] = useState<AdjustmentProposal | null>(null)
   const [isCourseMenuOpen, setIsCourseMenuOpen] = useState(false)
   const [isAiOpen, setIsAiOpen] = useState(false)
+  const [activeRightPanel, setActiveRightPanel] = useState<'ai' | 'notes'>('ai')
   const [isAiCollapsed, setIsAiCollapsed] = useState(false)
   const [aiPanelWidth, setAiPanelWidth] = useState<number | null>(null)
   const [isAiResizing, setIsAiResizing] = useState(false)
   const [isMaterialPreviewOpen, setIsMaterialPreviewOpen] = useState(false)
   const [materialPreviewPath, setMaterialPreviewPath] = useState<string | null>(null)
   const [isNewCourseOpen, setIsNewCourseOpen] = useState(false)
+  const [pendingCourseDelete, setPendingCourseDelete] = useState<Course | null>(null)
+  const [isArchivingCourse, setIsArchivingCourse] = useState(false)
+  const [pendingWrongAnswerDelete, setPendingWrongAnswerDelete] = useState<WrongAnswer | null>(null)
+  const [isArchivingWrongAnswer, setIsArchivingWrongAnswer] = useState(false)
   const [newCourseForm, setNewCourseForm] = useState<NewCourseForm>(initialNewCourseForm)
   const [newCourseError, setNewCourseError] = useState('')
   const [isCreatingCourse, setIsCreatingCourse] = useState(false)
@@ -526,6 +579,17 @@ function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = theme
   }, [theme])
+
+  useEffect(() => {
+    if (!pendingCourseDelete && !pendingWrongAnswerDelete) return
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      if (pendingCourseDelete && !isArchivingCourse) setPendingCourseDelete(null)
+      if (pendingWrongAnswerDelete && !isArchivingWrongAnswer) setPendingWrongAnswerDelete(null)
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [pendingCourseDelete, pendingWrongAnswerDelete, isArchivingCourse, isArchivingWrongAnswer])
 
   useEffect(() => {
     if (!strategyGenerationJob || !['queued', 'running'].includes(strategyGenerationJob.job.status)) return
@@ -558,7 +622,7 @@ function App() {
           setCourseWorkspaces((current) => ({ ...current, [refreshedWorkspace.course.id]: refreshedWorkspace }))
           setCourses((current) => mergeCourseList([refreshedWorkspace.course], current))
           setActiveCourseId(refreshedWorkspace.course.id)
-          setActiveModule('plan')
+          setActiveModule((current) => current === 'mock' ? 'mock' : 'plan')
           window.setTimeout(() => {
             setStrategyGenerationJob((current) => current?.job.id === job.id ? null : current)
           }, 8000)
@@ -636,6 +700,7 @@ function App() {
     setSearchError('')
     setHasSearched(false)
   }, [activeCourseId])
+
 
   useEffect(() => {
     function handleSearchShortcut(event: KeyboardEvent) {
@@ -756,6 +821,15 @@ function App() {
     if (activeCourse.id === workspace.course.id) return workspace
     return courseWorkspaces[activeCourse.id] ?? createLocalCourseWorkspace(activeCourse)
   }, [activeCourse, courseWorkspaces, workspace])
+
+  // 切换课程/模块后按 localStorage 里的文本锚点重建摘录高光：旧 Range 指向的
+  // 节点已卸载，锚点会在新 DOM 里重新定位；异步内容（AI 历史等）尚未渲染的
+  // 条目由 noteHighlights 内部的 MutationObserver 自动补挂。首次刷新时 activeCourseId
+  // 会先于真实课程 shell 就绪；等 activeWorkspace 加载完成后再恢复，避免只尝试挂到占位页。
+  useEffect(() => {
+    if (activeCourseId && activeWorkspace) restoreNoteHighlights(activeCourseId, activeWorkspace.note)
+  }, [activeCourseId, activeModule, activeWorkspace?.note])
+
   // 规划页需要全部课程的 workspace；把当前 live workspace 合进缓存，保证活动课程数据最新
   const planningWorkspaces = useMemo(() => {
     if (!workspace) return courseWorkspaces
@@ -871,7 +945,17 @@ function App() {
     window.addEventListener('pointercancel', stopResize)
   }, [isAiCollapsed, isMaterialPreviewOpen])
 
+  function openRightPanel(panel: 'ai' | 'notes') {
+    setActiveRightPanel(panel)
+    setIsAiCollapsed(false)
+    setIsAiOpen(true)
+  }
+
   function changeActiveModule(module: LearningModule) {
+    if (module === 'notes') {
+      openRightPanel('notes')
+      return
+    }
     if (module !== 'overview') {
       setDiagnosticReviewAnswers(null)
     }
@@ -911,15 +995,19 @@ function App() {
     if (activeWorkspace) void updateCourseWorkspace(activeWorkspace.course.id, { wrongAnswers }).catch(() => undefined)
   }
 
-  async function handleDeleteCourse(course: Course) {
-    const confirmed = window.confirm(
-      `确认删除「${course.name}」吗？删除后会先进入归档，7 天内可以恢复，超过 7 天会自动彻底删除。`,
-    )
-    if (!confirmed) return
+  function handleDeleteCourse(course: Course) {
+    setPendingCourseDelete(course)
+  }
 
+  async function confirmDeleteCourse() {
+    if (!pendingCourseDelete || isArchivingCourse) return
+    const course = pendingCourseDelete
+    setIsArchivingCourse(true)
     try {
       setIsCourseMenuOpen(false)
       const archiveItem = await deleteCourse(course.id)
+      // 高亮的文本锚点随课程删除失效，清掉持久化避免孤儿数据残留
+      discardCourseNoteHighlights(course.id)
       const remainingCourses = courses.filter((item) => item.id !== course.id)
       setCourses(remainingCourses)
       setArchiveItems((current) => [archiveItem, ...current.filter((item) => item.id !== archiveItem.id)])
@@ -932,25 +1020,41 @@ function App() {
         setActiveCourseId(remainingCourses[0]?.id ?? '')
         setActiveModule(remainingCourses.length ? 'overview' : 'archive')
       }
+      setPendingCourseDelete(null)
     } catch (error) {
       window.alert(error instanceof Error ? error.message : '课程删除失败，请稍后再试。')
+    } finally {
+      setIsArchivingCourse(false)
     }
   }
 
-  async function handleDeleteWrongAnswer(wrongAnswer: WrongAnswer) {
-    const confirmed = window.confirm(
-      `确认删除这道错题吗？删除后会先进入归档，7 天内可以恢复，超过 7 天会自动彻底删除。`,
-    )
-    if (!confirmed) return
+  function handleDeleteWrongAnswer(wrongAnswer: WrongAnswer) {
+    setPendingWrongAnswerDelete(wrongAnswer)
+  }
 
-    if (!activeWorkspace) return
-
+  async function confirmDeleteWrongAnswer() {
+    if (!activeWorkspace || !pendingWrongAnswerDelete || isArchivingWrongAnswer) return
+    setIsArchivingWrongAnswer(true)
     try {
-      const result = await deleteCourseWrongAnswer(activeWorkspace.course.id, wrongAnswer.id)
+      const result = await deleteCourseWrongAnswer(activeWorkspace.course.id, pendingWrongAnswerDelete.id)
       updateActiveWorkspace(() => result.workspace)
       setArchiveItems((current) => [result.archiveItem, ...current.filter((item) => item.id !== result.archiveItem.id)])
+      setPendingWrongAnswerDelete(null)
     } catch (error) {
       window.alert(error instanceof Error ? error.message : '错题删除失败，请稍后再试。')
+    } finally {
+      setIsArchivingWrongAnswer(false)
+    }
+  }
+
+  async function handlePermanentlyDeleteArchiveItem(item: ArchiveItem) {
+    try {
+      const result = await permanentlyDeleteArchiveItem(item.id)
+      setArchiveItems(result.archiveItems)
+      if (item.itemType === 'course') discardCourseNoteHighlights(item.entityId)
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : '永久删除失败，请稍后再试。')
+      throw error
     }
   }
 
@@ -1010,6 +1114,78 @@ function App() {
     updateNote(`${base}${base ? '\n\n' : ''}${blockquote}\n`)
   }
 
+  async function handleSubmitCourseFeedback(draft: CourseFeedbackDraft) {
+    if (!activeWorkspace) throw new Error('当前课程尚未加载。')
+    return submitCourseFeedback(activeWorkspace.course.id, draft)
+  }
+
+  async function handleSubmitGlobalCourseFeedback(taskId: string, sectionId: string, sectionIndex: number, userComment: string) {
+    if (!activeWorkspace) throw new Error('当前课程尚未加载。')
+    return submitGlobalCourseFeedback(activeWorkspace.course.id, taskId, sectionId, sectionIndex, userComment)
+  }
+
+  async function handleApplyGlobalCourseFeedback(feedbackId: string) {
+    if (!activeWorkspace) throw new Error('当前课程尚未加载。')
+    const result = await applyGlobalCourseFeedback(activeWorkspace.course.id, feedbackId)
+    updateActiveWorkspace(() => result.workspace)
+    return result.message
+  }
+
+  async function handleRefineCourseFeedback(feedbackId: string, extraComment: string, previousRewrite: string) {
+    if (!activeWorkspace) throw new Error('当前课程尚未加载。')
+    return refineCourseFeedbackRewrite(activeWorkspace.course.id, feedbackId, extraComment, previousRewrite)
+  }
+
+  async function handleApplyCourseFeedbackRewrite(feedbackId: string, originalText: string, rewrittenText: string, target: CourseFeedbackDraft['context']) {
+    if (!activeWorkspace) throw new Error('当前课程尚未加载。')
+    const result = await applyCourseFeedbackRewrite(activeWorkspace.course.id, feedbackId, originalText, rewrittenText, target)
+    // apply 接口返回的 workspace 就是本次替换落盘后的权威结果。这里不能再额外 GET：
+    // 若此时恰好有学习进度保存/内容刷新并发，二次读取可能拿到旧快照，导致界面提示
+    // “替换成功”却又被旧文本覆盖。直接提交接口结果可保证确认的改写立即显示。
+    updateActiveWorkspace(() => result.workspace)
+    return result.message
+  }
+
+  /**
+   * 点击高光取消时执行：先摘掉高光，再从笔记里删除对应引用块。
+   * 删除按「归一化文本完全相同」匹配 appendNoteSnippet 生成的 `> ` 块，
+   * 多条同内容摘录时只删最早的一条（与高光一条条移除的顺序一致）。
+   */
+  function removeNoteSnippet(hit: NoteHighlightHit) {
+    removeNoteHighlight(hit)
+    if (!activeWorkspace) return
+    const lines = activeWorkspace.note.replace(/\r\n?/g, '\n').split('\n')
+    // 定位引用块边界：从 `> ` 行起，直到非引用行（含引用块间空行）
+    let removeStart = -1
+    let removeEnd = -1
+    for (let i = 0; i < lines.length; i += 1) {
+      if (!lines[i].startsWith('> ')) continue
+      let j = i
+      while (j < lines.length && (lines[j].startsWith('> ') || lines[j] === '>')) j += 1
+      const blockText = lines
+        .slice(i, j)
+        .map((line) => line.replace(/^> ?/, ''))
+        .join('\n')
+        .trim()
+      if (blockText === hit.snippet) {
+        removeStart = i
+        removeEnd = j
+        break
+      }
+      i = j - 1
+    }
+    if (removeStart === -1) return
+    // 连同引用块后面的空行一起删，避免留下连续双空行
+    while (removeEnd < lines.length && lines[removeEnd].trim() === '') removeEnd += 1
+    const next = lines
+      .slice(0, removeStart)
+      .concat(lines.slice(removeEnd))
+      .join('\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trimEnd()
+    updateNote(next)
+  }
+
   async function applyProposal() {
     if (!activeWorkspace || !proposal || proposal.status !== 'pending') return
     try {
@@ -1054,18 +1230,32 @@ function App() {
     }
   }
 
-  async function handleRecordMinutes(courseId: string, _courseName: string, minutes: number) {
+  async function handleRecordMinutes(
+    courseId: string,
+    _courseName: string,
+    minutes: number,
+    clientEntryId?: string,
+  ) {
     try {
-      const result = await recordCourseTimeLog(courseId, { taskId: undefined, minutes })
-      if (activeWorkspace && activeWorkspace.course.id === courseId) {
-        updateActiveWorkspace((current) => ({
-          ...current,
-          timeLog: [...(current.timeLog ?? []), ...(result.entry ? [result.entry] : [])],
-          dailyProgress: result.dailyProgress,
-        }))
+      const result = await recordCourseTimeLog(courseId, { taskId: undefined, minutes, clientEntryId })
+      const mergeResult = (current: StudyWorkspace) => ({
+        ...current,
+        timeLog: result.entry && !(current.timeLog ?? []).some((entry) => entry.id === result.entry?.id)
+          ? [...(current.timeLog ?? []), result.entry]
+          : (current.timeLog ?? []),
+        dailyProgress: result.dailyProgress,
+      })
+      if (workspace?.course.id === courseId) {
+        setWorkspace((current) => current?.course.id === courseId ? mergeResult(current) : current)
+      } else {
+        setCourseWorkspaces((current) => {
+          const courseWorkspace = current[courseId]
+          return courseWorkspace ? { ...current, [courseId]: mergeResult(courseWorkspace) } : current
+        })
       }
     } catch (error) {
       window.alert(error instanceof Error ? error.message : '记录时长失败，请稍后再试。')
+      throw error
     }
   }
 
@@ -1311,9 +1501,21 @@ function App() {
     }))
   }
 
-  async function handleUploadMaterials(files: FileList) {
+  async function handleUploadMaterials(files: FileList | File[], role: 'primary' | 'supplementary' = 'supplementary') {
     if (!activeWorkspace) throw new Error('当前课程尚未加载。')
-    const refreshedWorkspace = await uploadCourseMaterials(activeWorkspace.course.id, files)
+    const refreshedWorkspace = await uploadCourseMaterials(activeWorkspace.course.id, files, role)
+    updateActiveWorkspace(() => ({
+      ...refreshedWorkspace,
+      strategyDocuments: refreshedWorkspace.strategyDocuments ?? activeWorkspace.strategyDocuments,
+    }))
+  }
+
+  async function handleUpdateMaterialRole(material: Material, role: 'primary' | 'supplementary') {
+    if (!activeWorkspace) throw new Error('当前课程尚未加载。')
+    const refreshedWorkspace = await updateCourseMaterialRole(activeWorkspace.course.id, material.relativePath, {
+      role,
+      priorityOrder: material.priorityOrder,
+    })
     updateActiveWorkspace(() => ({
       ...refreshedWorkspace,
       strategyDocuments: refreshedWorkspace.strategyDocuments ?? activeWorkspace.strategyDocuments,
@@ -1339,6 +1541,7 @@ function App() {
     reviewCount: number
     examFormat: string
     remarks: string
+    contentStyle: 'standard' | 'dialogue' | 'story'
   }) {
     if (!activeWorkspace) throw new Error('当前课程尚未加载。')
     setDiagnosticReviewAnswers(null)
@@ -1358,12 +1561,7 @@ function App() {
     setActiveModule('overview')
   }
 
-  async function handleApproveStrategyDocuments(payload: {
-    reviewPlan: string
-    coursePrompt: string
-    reviewPlanVersion: number
-    coursePromptVersion: number
-  }) {
+  async function handleApproveStrategyDocuments(payload: StrategyGenerationRequest) {
     if (!activeWorkspace) throw new Error('当前课程尚未加载。')
     const queued = await approveStrategyDocumentsInBackground(activeWorkspace.course.id, payload)
     const now = Date.now()
@@ -1399,7 +1597,14 @@ function App() {
     setActiveCourseId(refreshedWorkspace.course.id)
   }
 
-  async function handleRepairStrategyGeneration() {
+  async function handleReviewCourseReadability() {
+    if (!activeWorkspace) throw new Error('当前课程尚未加载。')
+    const reviewed = await reviewCourseReadability(activeWorkspace.course.id)
+    updateActiveWorkspace(() => reviewed)
+    setCourses((current) => mergeCourseList([reviewed.course], current))
+  }
+
+  async function handleRepairStrategyGeneration(lessonLimit: number | null = 1) {
     if (!activeWorkspace?.strategyDocuments) throw new Error('当前课程没有可用于修复的策略文档。')
     const { reviewPlan, coursePrompt } = activeWorkspace.strategyDocuments
     await handleApproveStrategyDocuments({
@@ -1407,7 +1612,29 @@ function App() {
       coursePrompt: coursePrompt.content,
       reviewPlanVersion: reviewPlan.version,
       coursePromptVersion: coursePrompt.version,
+      generationMode: 'incremental',
+      lessonLimit,
+      continueGeneration: true,
     })
+  }
+
+  async function handleCancelStrategyGeneration() {
+    if (!strategyGenerationJob || !['queued', 'running'].includes(strategyGenerationJob.job.status)) return
+    const cancelled = await cancelAgentJob(strategyGenerationJob.job.id)
+    setStrategyGenerationJob((current) => current ? { ...current, job: cancelled } : current)
+    if (activeWorkspace) {
+      const refreshed = await getCourseWorkspace(activeWorkspace.course.id)
+      updateActiveWorkspace(() => refreshed)
+    }
+  }
+
+  async function handleRepairMockGeneration() {
+    if (!activeWorkspace) throw new Error('当前课程尚未加载。')
+    const result = await repairCourseMockQuestions(activeWorkspace.course.id)
+    updateActiveWorkspace(() => result.workspace)
+    setCourses((current) => mergeCourseList([result.workspace.course], current))
+    setActiveCourseId(result.workspace.course.id)
+    setActiveModule('mock')
   }
 
   async function handleGenerateStrategyDocuments() {
@@ -1420,6 +1647,22 @@ function App() {
     if (!activeWorkspace) throw new Error('当前课程尚未加载。')
     const strategyDocuments = await saveCoursePrompt(activeWorkspace.course.id, coursePrompt, version)
     updateActiveWorkspace((current) => ({ ...current, strategyDocuments }))
+  }
+
+  /** 策略审阅页「和 AI 商量」：把当前草稿 + 诉求发给 revise SSE 端点，草稿仅在前端本地更新。 */
+  function handleReviseStrategyDraft(
+    payload: { message: string; history: StrategyRevisionMessage[]; reviewPlan: string; coursePrompt: string },
+    handlers: {
+      onToken: (text: string) => void
+      onDone: (result: { reply: string; reviewPlan: string; coursePrompt: string }) => void
+      onError: (message: string) => void
+    },
+  ): AgentStreamHandle {
+    if (!activeWorkspace) {
+      handlers.onError('当前课程尚未加载。')
+      return { cancel: () => {} }
+    }
+    return streamStrategyRevision(activeWorkspace.course.id, payload, handlers)
   }
 
   function updateNewCourseForm<K extends keyof NewCourseForm>(key: K, value: NewCourseForm[K]) {
@@ -1464,6 +1707,8 @@ function App() {
         dailyHours,
       })
       const createdWorkspace = await getCourseWorkspace(createdCourse.id)
+      setWorkspace(createdWorkspace)
+      setLoadError('')
       setCourses((current) => mergeCourseList(current, [createdCourse]))
       setCourseWorkspaces((current) => ({
         ...current,
@@ -1482,6 +1727,155 @@ function App() {
     }
   }
 
+  function renderWrongAnswerDeleteDialog() {
+    if (!pendingWrongAnswerDelete) return null
+    return (
+      <div className="archive-delete-backdrop" role="presentation" onMouseDown={() => { if (!isArchivingWrongAnswer) setPendingWrongAnswerDelete(null) }}>
+        <section
+          className="archive-delete-dialog course-archive-dialog"
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="wrong-answer-delete-title"
+          aria-describedby="wrong-answer-delete-description"
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <div className="archive-delete-dialog-icon course-archive-dialog-icon"><ArchiveRestore size={24} /></div>
+          <div className="archive-delete-dialog-copy">
+            <span className="archive-delete-dialog-kicker">错题将移入归档</span>
+            <h2 id="wrong-answer-delete-title">删除这道错题？</h2>
+            <p id="wrong-answer-delete-description">确认删除「<strong>{pendingWrongAnswerDelete.title}</strong>」吗？错题会先进入归档。</p>
+            <div className="archive-delete-dialog-warning course-archive-dialog-notice">
+              <ArchiveRestore size={17} />
+              <span>归档后 7 天内可以恢复；超过 7 天未恢复将自动彻底删除。</span>
+            </div>
+          </div>
+          <div className="archive-delete-dialog-actions">
+            <button type="button" className="archive-delete-cancel" disabled={isArchivingWrongAnswer} autoFocus onClick={() => setPendingWrongAnswerDelete(null)}>取消</button>
+            <button type="button" className="archive-delete-confirm course-archive-confirm" disabled={isArchivingWrongAnswer} onClick={() => void confirmDeleteWrongAnswer()}>
+              {isArchivingWrongAnswer ? <LoaderCircle className="spin" size={16} /> : <ArchiveRestore size={16} />}
+              {isArchivingWrongAnswer ? '正在移入归档…' : '确认删除并归档'}
+            </button>
+          </div>
+        </section>
+      </div>
+    )
+  }
+
+  function renderCourseDeleteDialog() {
+    if (!pendingCourseDelete) return null
+    return (
+      <div
+        className="archive-delete-backdrop"
+        role="presentation"
+        onMouseDown={() => { if (!isArchivingCourse) setPendingCourseDelete(null) }}
+      >
+        <section
+          className="archive-delete-dialog course-archive-dialog"
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="course-delete-dialog-title"
+          aria-describedby="course-delete-dialog-description"
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <div className="archive-delete-dialog-icon course-archive-dialog-icon"><ArchiveRestore size={24} /></div>
+          <div className="archive-delete-dialog-copy">
+            <span className="archive-delete-dialog-kicker">课程将移入归档</span>
+            <h2 id="course-delete-dialog-title">删除这门课程？</h2>
+            <p id="course-delete-dialog-description">
+              确认删除「<strong>{pendingCourseDelete.name}</strong>」吗？课程会先进入归档，而不是立即永久删除。
+            </p>
+            <div className="archive-delete-dialog-warning course-archive-dialog-notice">
+              <ArchiveRestore size={17} />
+              <span>归档后 7 天内可以恢复；超过 7 天未恢复，课程及其 data 数据将自动彻底删除。</span>
+            </div>
+          </div>
+          <div className="archive-delete-dialog-actions">
+            <button type="button" className="archive-delete-cancel" disabled={isArchivingCourse} autoFocus onClick={() => setPendingCourseDelete(null)}>
+              取消
+            </button>
+            <button type="button" className="archive-delete-confirm course-archive-confirm" disabled={isArchivingCourse} onClick={() => void confirmDeleteCourse()}>
+              {isArchivingCourse ? <LoaderCircle className="spin" size={16} /> : <ArchiveRestore size={16} />}
+              {isArchivingCourse ? '正在移入归档…' : '确认删除并归档'}
+            </button>
+          </div>
+        </section>
+      </div>
+    )
+  }
+
+  function renderNewCourseModal() {
+    if (!isNewCourseOpen) return null
+    return (
+      <div className="modal-backdrop" role="presentation" onMouseDown={closeNewCourseModal}>
+        <section
+          className="new-course-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="new-course-title"
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <div className="modal-icon">
+            <BookOpen size={21} />
+          </div>
+          <h2 id="new-course-title">新建课程</h2>
+          <p>填写考试时间和目标，系统会先建立课程卡片与基础复习主线。</p>
+          <form className="new-course-form" onSubmit={handleCreateCourse}>
+            <label>
+              课程名称
+              <input
+                autoFocus
+                value={newCourseForm.name}
+                placeholder="例如：大学物理"
+                onChange={(event) => updateNewCourseForm('name', event.target.value)}
+              />
+            </label>
+            <label>
+              考试日期
+              <input
+                type="date"
+                value={newCourseForm.examDate}
+                onChange={(event) => updateNewCourseForm('examDate', event.target.value)}
+              />
+            </label>
+            <div className="new-course-grid">
+              <label>
+                目标分数
+                <input
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value={newCourseForm.targetScore}
+                  onChange={(event) => updateNewCourseForm('targetScore', event.target.value)}
+                />
+              </label>
+              <label>
+                每日可用
+                <input
+                  type="number"
+                  min="0.5"
+                  max="24"
+                  step="0.5"
+                  value={newCourseForm.dailyHours}
+                  onChange={(event) => updateNewCourseForm('dailyHours', event.target.value)}
+                />
+              </label>
+            </div>
+            {newCourseError && <p className="form-error" role="alert">{newCourseError}</p>}
+            <div className="modal-actions">
+              <button className="secondary-button" type="button" disabled={isCreatingCourse} onClick={closeNewCourseModal}>
+                取消
+              </button>
+              <button className="primary-button" type="submit" disabled={isCreatingCourse}>
+                {isCreatingCourse ? '创建中' : '创建课程'}
+              </button>
+            </div>
+          </form>
+        </section>
+      </div>
+    )
+  }
+
   if (!isAuthed) {
     return <LoginPage onAuthed={() => setAuthUser(getStoredUser())} />
   }
@@ -1489,16 +1883,48 @@ function App() {
   if (loadError) {
     return (
       <div className="app-shell boot-shell">
+        {!isDemoMode && (
+          <aside className="boot-account-switcher" aria-label="当前登录账号">
+            <span className="boot-account-avatar" aria-hidden="true">
+              {authUser?.avatarUrl
+                ? <img src={authUser.avatarUrl} alt="" />
+                : (authUser?.displayName || authUser?.email || '用').trim().slice(0, 1).toUpperCase()}
+            </span>
+            <span className="boot-account-copy">
+              <strong>{authUser?.displayName || '当前账号'}</strong>
+              <small>{authUser?.email}</small>
+            </span>
+            <button type="button" onClick={handleLogout}>
+              <LogOut size={15} aria-hidden="true" />
+              <span>换一个账号登录</span>
+              <small>退出当前账号</small>
+            </button>
+          </aside>
+        )}
         <main className="main-area">
           <section className="module-page empty-module">
             <BookOpen size={32} />
             <h1>课程学习空间暂未启动</h1>
             <p>{loadError}</p>
-            <button className="primary-button" type="button" onClick={() => window.location.reload()}>
-              重新连接本机服务
-            </button>
+            {loadError.includes('尚未创建课程') ? (
+              <div className="modal-actions">
+                <button className="primary-button" type="button" onClick={() => setIsNewCourseOpen(true)}>
+                  创建第一门课程
+                </button>
+                <button className="secondary-button" type="button" onClick={() => window.location.reload()}>
+                  重新连接本机服务
+                </button>
+              </div>
+            ) : (
+              <button className="primary-button" type="button" onClick={() => window.location.reload()}>
+                重新连接本机服务
+              </button>
+            )}
           </section>
         </main>
+        {renderNewCourseModal()}
+        {renderCourseDeleteDialog()}
+        {renderWrongAnswerDeleteDialog()}
       </div>
     )
   }
@@ -1520,7 +1946,14 @@ function App() {
 
   return (
     <GlossaryProvider courseId={activeCourseId}>
-    <CourseTimerProvider onRecordMinutes={handleRecordMinutes}>
+    <CourseTimerProvider
+      activeCourseId={activeWorkspace.course.id}
+      activeCourseName={activeWorkspace.course.name}
+      userId={authUser?.id ?? 'demo'}
+      onRecordMinutes={handleRecordMinutes}
+      onFlushMinutes={flushCourseTimeLog}
+      finalizeRef={finalizeCourseTimerRef}
+    >
     <div
       className={`app-shell${isAiCollapsed ? ' is-ai-collapsed' : ''}${isAiOpen ? ' is-ai-open' : ''}${isMaterialPreviewOpen ? ' is-material-preview-open' : ''}${isAiResizing ? ' is-ai-resizing' : ''}`}
       style={appShellStyle}
@@ -1528,75 +1961,93 @@ function App() {
       <MainNavigation
         activeModule={activeModule}
         onModuleChange={changeActiveModule}
-        userName={authUser?.displayName}
-        onLogout={isDemoMode ? undefined : handleLogout}
       />
 
-      <main className="main-area">
-        <header className="topbar">
-          <div className="mobile-brand">
-            <span>期末粥加速器</span>
-          </div>
+      <header className="topbar">
+        <div className="topbar-main">
+        <div className="mobile-brand">
+          <span>期末粥加速器</span>
+        </div>
 
-          <div className="topbar-context">
-            <div className="crumbs">
-              <span className="section-dot" aria-hidden="true"></span>
-              <span>{modelProfile.status === 'connected' ? 'AI 已连接' : '本地资料模式'}</span>
-              <span className="crumb-divider">/</span>
-              <span>{activeCourse.name}</span>
-            </div>
-            <div className="topbar-status">
-              <Sparkles size={13} />
-              <span>{activeWorkspace.materials.length ? `${activeWorkspace.materials.length} 份资料已索引` : `${activeWorkspace.course.name}课程已建立`}</span>
-              <Clock3 size={13} />
-              <span>每天 {activeWorkspace.course.dailyHours}h · 目标 {activeWorkspace.course.targetScore}+</span>
-            </div>
+        <div className="topbar-context">
+          <div className="crumbs">
+            <span className="section-dot" aria-hidden="true"></span>
+            <span>{modelProfile.status === 'connected' ? 'AI 已连接' : '本地资料模式'}</span>
+            <span className="crumb-divider">/</span>
+            <span>{activeCourse.name}</span>
           </div>
+          <div className="topbar-status">
+            <Sparkles size={13} />
+            <span>{activeWorkspace.materials.length ? `${activeWorkspace.materials.length} 份资料已索引` : `${activeWorkspace.course.name}课程已建立`}</span>
+            <Clock3 size={13} />
+            <span>每天 {activeWorkspace.course.dailyHours}h · 目标 {activeWorkspace.course.targetScore}+</span>
+          </div>
+        </div>
 
-          <TopbarCourseTimer
-            activeCourseId={activeWorkspace.course.id}
-            activeCourseName={activeWorkspace.course.name}
+        <TopbarCourseTimer
+          activeCourseId={activeWorkspace.course.id}
+          activeCourseName={activeWorkspace.course.name}
+        />
+
+        <div className="topbar-actions">
+          <CourseSwitcher
+            courses={courses}
+            activeCourse={activeCourse}
+            isOpen={isCourseMenuOpen}
+            menuRef={courseMenuRef}
+            onToggle={() => setIsCourseMenuOpen((current) => !current)}
+            onSelectCourse={(course) => { void handleSelectCourse(course) }}
+            onDeleteCourse={handleDeleteCourse}
+            onNewCourse={() => {
+              setIsCourseMenuOpen(false)
+              setIsNewCourseOpen(true)
+            }}
           />
+          <button className="search-button" type="button" onClick={() => setSearchOpen(true)}>
+            <Search size={16} />
+            <span>搜索资料 / 知识点</span>
+            <kbd>Ctrl K</kbd>
+          </button>
+          <button
+            className="icon-button"
+            type="button"
+            aria-label={theme === 'light' ? '切换深色模式' : '切换浅色模式'}
+            onClick={() => setTheme((current) => (current === 'light' ? 'dark' : 'light'))}
+          >
+            {theme === 'light' ? <Moon size={18} /> : <Sun size={18} />}
+          </button>
+          <QuickBackToTopButton />
+          <button
+            className="icon-button mobile-only"
+            type="button"
+            aria-label="打开 AI 伴学"
+            onClick={() => openRightPanel('ai')}
+          >
+            <PanelRightOpen size={19} />
+          </button>
+        </div>
+        </div>
 
-          <div className="topbar-actions">
-            <CourseSwitcher
-              courses={courses}
-              activeCourse={activeCourse}
-              isOpen={isCourseMenuOpen}
-              menuRef={courseMenuRef}
-              onToggle={() => setIsCourseMenuOpen((current) => !current)}
-              onSelectCourse={(course) => { void handleSelectCourse(course) }}
-              onDeleteCourse={handleDeleteCourse}
-              onNewCourse={() => {
-                setIsCourseMenuOpen(false)
-                setIsNewCourseOpen(true)
-              }}
-            />
-            <button className="search-button" type="button" onClick={() => setSearchOpen(true)}>
-              <Search size={16} />
-              <span>搜索资料 / 知识点</span>
-              <kbd>Ctrl K</kbd>
-            </button>
-            <button
-              className="icon-button"
-              type="button"
-              aria-label={theme === 'light' ? '切换深色模式' : '切换浅色模式'}
-              onClick={() => setTheme((current) => (current === 'light' ? 'dark' : 'light'))}
-            >
-              {theme === 'light' ? <Moon size={18} /> : <Sun size={18} />}
-            </button>
-            <QuickBackToTopButton />
-            <button
-              className="icon-button mobile-only"
-              type="button"
-              aria-label="打开 AI 伴学"
-              onClick={() => setIsAiOpen(true)}
-            >
-              <PanelRightOpen size={19} />
-            </button>
-          </div>
-        </header>
+        <button
+          className="topbar-user-shortcut"
+          type="button"
+          title="打开账号设置"
+          aria-label="打开账号设置"
+          onClick={() => changeActiveModule('settings')}
+        >
+          <span className="topbar-user-avatar" aria-hidden="true">
+            {authUser?.avatarUrl
+              ? <img src={authUser.avatarUrl} alt="" />
+              : (authUser?.displayName || authUser?.email || '用').trim().slice(0, 1).toUpperCase()}
+          </span>
+          <span className="topbar-user-copy">
+            <strong>{authUser?.displayName || authUser?.email || '未登录用户'}</strong>
+            <small>{authUser?.email || '点击进入设置'}</small>
+          </span>
+        </button>
+      </header>
 
+      <main className="main-area">
         <ModuleView
           activeModule={activeModule}
           courses={courses}
@@ -1620,15 +2071,20 @@ function App() {
           onboarding={activeWorkspace.onboarding}
           strategyDocuments={activeWorkspace.strategyDocuments}
           strategyGenerationJob={strategyGenerationJob}
+          readabilityReview={activeWorkspace.readabilityReview}
           diagnosticQuestions={activeWorkspace.diagnosticQuestions}
           modelProfile={modelProfile}
           theme={theme}
           uiFont={uiFont}
           uiFontSize={uiFontSize}
+          authUser={authUser}
+          onAuthUserChange={handleAuthUserChange}
+          onLogout={isDemoMode ? undefined : handleLogout}
           onTasksChange={updateWorkspaceTasks}
           onWrongAnswersChange={updateWrongAnswers}
           onDeleteWrongAnswer={handleDeleteWrongAnswer}
           onRestoreArchiveItem={handleRestoreArchiveItem}
+          onPermanentlyDeleteArchiveItem={handlePermanentlyDeleteArchiveItem}
           onNoteChange={updateNote}
           onModelProfileChange={setModelProfile}
           onThemeChange={setTheme}
@@ -1639,12 +2095,17 @@ function App() {
           onRescanMaterials={handleRescanMaterials}
           onUploadMaterials={handleUploadMaterials}
           onDeleteMaterial={handleDeleteMaterial}
+          onUpdateMaterialRole={handleUpdateMaterialRole}
           onSaveCourseSetup={handleSaveCourseSetup}
           onSubmitDiagnostic={handleSubmitDiagnostic}
           onGenerateStrategyDocuments={handleGenerateStrategyDocuments}
           onApproveStrategyDocuments={handleApproveStrategyDocuments}
           onRefreshWorkspace={handleRefreshWorkspace}
+          onReviewCourseReadability={handleReviewCourseReadability}
           onRepairStrategyGeneration={handleRepairStrategyGeneration}
+          onCancelStrategyGeneration={handleCancelStrategyGeneration}
+          onRepairMockGeneration={handleRepairMockGeneration}
+          onReviseStrategyDraft={handleReviseStrategyDraft}
           onSaveCoursePrompt={handleSaveCoursePrompt}
           onMaterialPreviewOpenChange={handleMaterialPreviewOpenChange}
           materialPreviewPath={materialPreviewPath}
@@ -1655,6 +2116,7 @@ function App() {
           onClearPracticeAnswer={handleClearPracticeAnswer}
           onClearMockResult={handleClearMockResult}
           onActiveStudyTaskChange={setActiveStudyTaskId}
+          onActiveStudySectionChange={setActiveStudySection}
           planStartDate={activeWorkspace.planStartDate}
           timeLog={activeWorkspace.timeLog}
           dailyProgress={activeWorkspace.dailyProgress}
@@ -1673,85 +2135,28 @@ function App() {
         messages={activeWorkspace.messages}
         proposal={proposal}
         modelProfile={modelProfile}
+        note={activeWorkspace.note}
+        activePanel={activeRightPanel}
         isCollapsed={isAiCollapsed}
         onClose={() => setIsAiOpen(false)}
         onToggleCollapse={() => setIsAiCollapsed((current) => !current)}
+        onSelectPanel={openRightPanel}
         onResizeStart={handleAiPanelResizeStart}
         onApplyProposal={applyProposal}
         onDismissProposal={dismissProposal}
         onSendMessage={handleAgentMessage}
+        activeStudyTask={activeStudyTaskId ? activeWorkspace.tasks.find((task) => task.id === activeStudyTaskId) ?? null : null}
+        activeStudySection={activeStudySection}
+        onSubmitGlobalCourseFeedback={handleSubmitGlobalCourseFeedback}
+        onApplyGlobalCourseFeedback={handleApplyGlobalCourseFeedback}
+        onNoteChange={updateNote}
         streamingMessage={streamingMessage}
+        strategyReviewActive={activeModule === 'overview' && activeWorkspace.onboarding?.status === 'strategy-review'}
       />
 
-      {isNewCourseOpen && (
-        <div className="modal-backdrop" role="presentation" onMouseDown={closeNewCourseModal}>
-          <section
-            className="new-course-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="new-course-title"
-            onMouseDown={(event) => event.stopPropagation()}
-          >
-            <div className="modal-icon">
-              <BookOpen size={21} />
-            </div>
-            <h2 id="new-course-title">新建课程</h2>
-            <p>填写考试时间和目标，系统会先建立课程卡片与基础复习主线。</p>
-            <form className="new-course-form" onSubmit={handleCreateCourse}>
-              <label>
-                课程名称
-                <input
-                  autoFocus
-                  value={newCourseForm.name}
-                  placeholder="例如：大学物理"
-                  onChange={(event) => updateNewCourseForm('name', event.target.value)}
-                />
-              </label>
-              <label>
-                考试日期
-                <input
-                  type="date"
-                  value={newCourseForm.examDate}
-                  onChange={(event) => updateNewCourseForm('examDate', event.target.value)}
-                />
-              </label>
-              <div className="new-course-grid">
-                <label>
-                  目标分数
-                  <input
-                    type="number"
-                    min="0"
-                    max="100"
-                    step="1"
-                    value={newCourseForm.targetScore}
-                    onChange={(event) => updateNewCourseForm('targetScore', event.target.value)}
-                  />
-                </label>
-                <label>
-                  每日可用
-                  <input
-                    type="number"
-                    min="0.5"
-                    max="24"
-                    step="0.5"
-                    value={newCourseForm.dailyHours}
-                    onChange={(event) => updateNewCourseForm('dailyHours', event.target.value)}
-                  />
-                </label>
-              </div>
-              {newCourseError && <p className="form-error" role="alert">{newCourseError}</p>}
-              <div className="modal-actions">
-                <button className="secondary-button" type="button" disabled={isCreatingCourse} onClick={closeNewCourseModal}>
-                  取消
-                </button>
-                <button className="primary-button" type="submit" disabled={isCreatingCourse}>
-                  {isCreatingCourse ? '创建中' : '创建课程'}
-                </button>
-              </div>
-            </form>
-          </section>
-        </div>
-      )}
+      {renderNewCourseModal()}
+      {renderCourseDeleteDialog()}
+      {renderWrongAnswerDeleteDialog()}
 
       {searchOpen && (
         <div className="modal-backdrop" role="presentation" onMouseDown={() => setSearchOpen(false)}>
@@ -1827,7 +2232,13 @@ function App() {
         </div>
       )}
 
-      <SelectionToNoteToolbar onAddToNote={appendNoteSnippet} />
+      <SelectionToNoteToolbar
+        onAddToNote={appendNoteSnippet}
+        onSubmitCourseFeedback={handleSubmitCourseFeedback}
+        onRefineCourseFeedback={handleRefineCourseFeedback}
+        onApplyCourseFeedbackRewrite={handleApplyCourseFeedbackRewrite}
+      />
+      <NoteHighlightDismiss onRemove={removeNoteSnippet} />
     </div>
     </CourseTimerProvider>
     </GlossaryProvider>

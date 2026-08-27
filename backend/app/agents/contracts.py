@@ -51,7 +51,6 @@ class PlanDay(BaseModel):
 
 class ReviewPlanSpec(BaseModel):
     goal_summary: str
-    diagnostic_summary: str
     scope_summary: str
     priority_notes: list[str]
     days: list[PlanDay]

@@ -1,13 +1,16 @@
 import { type CSSProperties, type FormEvent, memo, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Bot, Check, LoaderCircle, MessageCircle, PanelRightClose, PanelRightOpen, Send, Sparkles, X } from 'lucide-react'
+import { Bot, Check, FilePenLine, LoaderCircle, MessageCircle, MessageCircleMore, NotebookPen, PanelRightClose, Send, Sparkles, X } from 'lucide-react'
 import rehypeKatex from 'rehype-katex'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import 'katex/dist/katex.min.css'
-import type { AdjustmentProposal, Course, ModelProfile, StreamingMessage, StreamingToolEvent, StudyMessage } from '../types'
+import type { AdjustmentProposal, Course, GlobalCourseFeedbackResult, ModelProfile, PlanTask, StreamingMessage, StreamingToolEvent, StudyMessage } from '../types'
+import { NotesSidebarPanel } from './NotesSidebarPanel'
 import { glossaryMarkdownComponents } from '../glossary/termMatcher'
+
+type RightPanel = 'ai' | 'notes'
 
 type AiCompanionProps = {
   className?: string
@@ -15,14 +18,23 @@ type AiCompanionProps = {
   messages: StudyMessage[]
   proposal: AdjustmentProposal | null
   modelProfile: ModelProfile
+  note: string
+  activePanel: RightPanel
   isCollapsed: boolean
   onClose: () => void
   onToggleCollapse: () => void
+  onSelectPanel: (panel: RightPanel) => void
   onResizeStart: (event: ReactPointerEvent<HTMLButtonElement>) => void
   onApplyProposal: () => void
   onDismissProposal: () => void
   onSendMessage: (message: string, mode: CompanionMode) => Promise<void>
+  activeStudyTask: PlanTask | null
+  activeStudySection: { index: number; id: string; label: string; title: string } | null
+  onSubmitGlobalCourseFeedback: (taskId: string, sectionId: string, sectionIndex: number, userComment: string) => Promise<GlobalCourseFeedbackResult>
+  onApplyGlobalCourseFeedback: (feedbackId: string) => Promise<string | void>
+  onNoteChange: (note: string) => void
   streamingMessage?: StreamingMessage | null
+  strategyReviewActive?: boolean
 }
 
 type CompanionMode = 'chat' | 'agent'
@@ -181,28 +193,51 @@ export function AiCompanion({
   messages,
   proposal,
   modelProfile,
+  note,
+  activePanel,
   isCollapsed,
   onClose,
   onToggleCollapse,
+  onSelectPanel,
   onResizeStart,
   onApplyProposal,
   onDismissProposal,
   onSendMessage,
+  activeStudyTask,
+  activeStudySection,
+  onSubmitGlobalCourseFeedback,
+  onApplyGlobalCourseFeedback,
+  onNoteChange,
   streamingMessage,
+  strategyReviewActive = false,
 }: AiCompanionProps) {
   const [mode, setMode] = useState<CompanionMode>('chat')
   const [input, setInput] = useState('')
   const [isSending, setIsSending] = useState(false)
   const [pendingMessage, setPendingMessage] = useState<StudyMessage | null>(null)
   const [sendError, setSendError] = useState('')
+  const [globalEditorOpen, setGlobalEditorOpen] = useState(false)
+  const [globalComment, setGlobalComment] = useState('')
+  const [globalResult, setGlobalResult] = useState<GlobalCourseFeedbackResult | null>(null)
+  const [globalStatus, setGlobalStatus] = useState<'idle' | 'generating' | 'preview' | 'applying' | 'applied' | 'error'>('idle')
+  const [globalMessage, setGlobalMessage] = useState('')
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  const inputRef = useRef<HTMLTextAreaElement | null>(null)
   const stickRef = useRef(true) // 是否贴底跟随（用户上翻回看时为 false）
   const didInitRef = useRef(false) // 首次挂载时强制贴底一次
   const turnRefs = useRef<Map<string, HTMLElement>>(new Map())
   const [activeTurnIdx, setActiveTurnIdx] = useState(0)
   const [turnTooltip, setTurnTooltip] = useState<{ content: string; style: CSSProperties } | null>(null)
   const canSend = input.trim().length > 0 && !isSending
-  const panelClassName = ['ai-panel', isCollapsed ? 'is-collapsed' : '', className].filter(Boolean).join(' ')
+  const isAiPanel = activePanel === 'ai'
+  const isStrategyReviewTakeover = isAiPanel && strategyReviewActive
+  const panelClassName = ['ai-panel', isCollapsed ? 'is-collapsed' : '', isStrategyReviewTakeover ? 'is-strategy-review-takeover' : '', 'is-' + activePanel + '-panel', className].filter(Boolean).join(' ')
+  const panelTitle = isAiPanel ? (isStrategyReviewTakeover ? '和 AI 商量' : 'AI 伴学') : '复习笔记'
+  const panelSubtitle = isAiPanel
+    ? isStrategyReviewTakeover
+      ? '策略审阅 · 只修改当前草稿'
+      : (modelProfile.status === 'connected' ? modelProfile.model : '未配置模型') + ' · ' + course.name
+    : course.name + ' · 自动保存'
   const modeMessages = messages.filter((message) => (message.mode ?? 'chat') === mode)
   const thinkingText = mode === 'agent' ? 'Agent 已收到指令，正在拆解下一步行动...' : '我已收到，正在思考...'
   // 流式占位消息的时间戳取自本地上屏的用户消息
@@ -328,10 +363,69 @@ export function AiCompanion({
     }
   }
 
+  async function generateGlobalRevision() {
+    const comment = globalComment.trim()
+    if (!activeStudyTask?.studyGuide || !activeStudySection) {
+      setGlobalStatus('error')
+      setGlobalMessage('请先打开课程中的一个小节，再提交整体修改。')
+      return
+    }
+    if (!comment) {
+      setGlobalStatus('error')
+      setGlobalMessage('请写下你希望对当前小节进行的修改。')
+      return
+    }
+    setGlobalStatus('generating')
+    setGlobalMessage('')
+    try {
+      const result = await onSubmitGlobalCourseFeedback(activeStudyTask.id, activeStudySection.id, activeStudySection.index, comment)
+      setGlobalResult(result)
+      setGlobalStatus('preview')
+      setGlobalMessage(result.message)
+    } catch (error) {
+      setGlobalStatus('error')
+      setGlobalMessage(error instanceof Error ? error.message : '小节修改生成失败，请稍后再试。')
+    }
+  }
+
+  async function applyGlobalRevision() {
+    if (!globalResult) return
+    setGlobalStatus('applying')
+    try {
+      const message = await onApplyGlobalCourseFeedback(globalResult.feedbackId)
+      setGlobalStatus('applied')
+      setGlobalMessage(message || '已应用当前小节修改。')
+    } catch (error) {
+      setGlobalStatus('error')
+      setGlobalMessage(error instanceof Error ? error.message : '全局修改应用失败，请重新生成。')
+    }
+  }
+
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     void sendMessage()
   }
+
+  function resizeInput() {
+    const textarea = inputRef.current
+    if (!textarea) return
+    textarea.style.height = 'auto'
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 240)}px`
+    textarea.style.overflowY = textarea.scrollHeight > 240 ? 'auto' : 'hidden'
+  }
+
+  useEffect(() => {
+    resizeInput()
+  }, [input])
+
+  useEffect(() => {
+    const textarea = inputRef.current
+    const container = textarea?.parentElement
+    if (!container || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(resizeInput)
+    observer.observe(container)
+    return () => observer.disconnect()
+  }, [])
 
   // 稳定回调：避免 memo 的 ChatMessageItem 因内联箭头函数身份变化而失效
   const registerTurnRef = useCallback((id: string, node: HTMLElement | null) => {
@@ -366,177 +460,250 @@ export function AiCompanion({
 
       <div className="ai-collapsed-rail">
         <button
-          className="icon-button ai-expand-button"
+          className={["ai-collapsed-brand", activePanel === 'ai' ? 'is-active' : ''].filter(Boolean).join(' ')}
           type="button"
           aria-label="展开 AI 伴学"
           title="展开 AI 伴学"
-          onClick={onToggleCollapse}
+          aria-expanded={!isCollapsed && activePanel === 'ai'}
+          onClick={() => onSelectPanel('ai')}
         >
-          <PanelRightOpen size={18} />
-        </button>
-        <div className="ai-collapsed-brand">
-          <span className="ai-avatar"><Bot size={18} /></span>
+          <span className="ai-avatar"><MessageCircleMore size={18} /></span>
           <span>AI<br />伴学</span>
-        </div>
+        </button>
+        <button
+          className={["ai-collapsed-brand", activePanel === 'notes' ? 'is-active' : ''].filter(Boolean).join(' ')}
+          type="button"
+          aria-label="展开复习笔记"
+          title="展开复习笔记"
+          aria-expanded={!isCollapsed && activePanel === 'notes'}
+          onClick={() => onSelectPanel('notes')}
+        >
+          <span className="ai-avatar"><NotebookPen size={18} /></span>
+          <span>复习<br />笔记</span>
+        </button>
       </div>
 
       <header className="ai-panel-header">
-        <div>
-          <span className="ai-avatar"><Bot size={18} /></span>
+        <div className="ai-panel-identity">
+          <span className="ai-avatar">
+            {isAiPanel ? <MessageCircleMore size={18} /> : <NotebookPen size={18} />}
+          </span>
           <div>
-            <h2>AI 伴学</h2>
-            <span>{modelProfile.status === 'connected' ? modelProfile.model : '未配置模型'} · {course.name}</span>
+            <h2>{panelTitle}</h2>
+            <span>{panelSubtitle}</span>
           </div>
         </div>
         <div className="ai-panel-actions">
           <button
             className="icon-button ai-collapse-toggle"
             type="button"
-            aria-label="收起 AI 伴学"
-            title="收起 AI 伴学"
+            aria-label={isAiPanel ? '收起 AI 伴学' : '收起复习笔记'}
+            title={isAiPanel ? '收起 AI 伴学' : '收起复习笔记'}
             aria-expanded={!isCollapsed}
             onClick={onToggleCollapse}
           >
             <PanelRightClose size={17} />
           </button>
-          <button className="icon-button ai-close" type="button" aria-label="关闭 AI 伴学" onClick={onClose}>
+          <button className="icon-button ai-close" type="button" aria-label={isAiPanel ? '关闭 AI 伴学' : '关闭复习笔记'} onClick={onClose}>
             <X size={18} />
           </button>
         </div>
       </header>
 
-      <div className="ai-mode-switch" role="tablist" aria-label="伴学模式">
-        <button
-          className={mode === 'chat' ? 'is-active' : ''}
-          type="button"
-          role="tab"
-          aria-selected={mode === 'chat'}
-          onClick={() => setMode('chat')}
-        >
-          <MessageCircle size={14} />
-          <span>Chat</span>
-        </button>
-        <button
-          className={mode === 'agent' ? 'is-active' : ''}
-          type="button"
-          role="tab"
-          aria-selected={mode === 'agent'}
-          onClick={() => setMode('agent')}
-        >
-          <Sparkles size={14} />
-          <span>Agent</span>
-        </button>
-      </div>
-
-      <div className="ai-scroll-wrap">
-        <div className="ai-scroll" ref={scrollRef} onScroll={handleScroll}>
-        <section className={`companion-card ${mode === 'agent' ? 'is-agent-mode' : ''}`}>
-          <div className="companion-orb">
-            {mode === 'chat' ? <Bot size={37} /> : <Sparkles size={37} />}
+      {isAiPanel ? (
+        isStrategyReviewTakeover ? (
+          <div id="strategy-revision-slot" className="strategy-revision-takeover-slot">
+            <section className="strategy-revision-placeholder">
+              <Sparkles size={18} />
+              <strong>正在连接策略草稿…</strong>
+              <p>打开策略审阅页后，可以直接在这里让 AI 修改两份草稿。</p>
+            </section>
           </div>
-          {mode === 'chat' ? (
-            <>
-              <strong>晚好，冲刺的你很棒！</strong>
-              <p>我会根据你的资料、作答和时间安排，让每一段复习都更值钱。</p>
-            </>
-          ) : (
-            <>
-              <strong>Agent 模式已待命</strong>
-              <p>我会把资料、计划和错题串起来，给你拆成下一步可以执行的动作。</p>
-            </>
-          )}
-        </section>
-
-        {mode === 'chat' ? (
-          <section className="chat-history" aria-label="AI 对话记录">
-            {visibleMessages.map(renderMessage)}
-          </section>
         ) : (
-          <section className="agent-workbench" aria-label="Agent 操作">
-            <div className="agent-workbench-heading">
-              <Sparkles size={18} />
-              <div>
-                <span>行动入口</span>
-                <strong>让 Agent 接管一段复习任务</strong>
-              </div>
-            </div>
-            <div className="agent-prompt-grid">
-              {agentPrompts.map((prompt) => (
-                <button type="button" key={prompt} onClick={() => setInput(prompt)}>
-                  {prompt}
-                </button>
-              ))}
-            </div>
-          </section>
-        )}
-
-        {mode === 'agent' && visibleMessages.length > 0 && (
-          <section className="chat-history" aria-label="Agent 交互记录">
-            {visibleMessages.map(renderMessage)}
-          </section>
-        )}
-
-        {sendError && <p className="ai-send-error">{sendError}</p>}
-
-        {mode === 'agent' && proposal && proposal.status === 'pending' && (
-          <section className="proposal-card">
-            <div className="proposal-heading">
-              <Sparkles size={18} />
-              <div>
-                <span>调整提案</span>
-                <strong>{proposal.title}</strong>
-              </div>
-            </div>
-            <p>{proposal.reason}</p>
-            <div className="proposal-impact">{proposal.impact}</div>
-            <div className="proposal-actions">
-              <button className="primary-button" type="button" onClick={onApplyProposal}>
-                <Check size={16} /> 确认调整
-              </button>
-              <button className="secondary-button" type="button" onClick={onDismissProposal}>
-                暂不应用
-              </button>
-            </div>
-          </section>
-        )}
-
-        {mode === 'agent' && proposal?.status === 'applied' && (
-          <section className="applied-proposal">
-            <Check size={17} />
-            <span>已应用：{proposal.title}</span>
-          </section>
-        )}
-        </div>
-        {userTurns.length >= 1 && (
-          <div className="chat-turn-rail" role="navigation" aria-label="跳转到某一轮对话">
-            {userTurns.map((message, index) => (
-              <button
-                key={message.id}
-                type="button"
-                className={['chat-turn-dot', index === activeTurnIdx ? 'is-active' : ''].filter(Boolean).join(' ')}
-                aria-label={`跳转到第 ${index + 1} 轮提问`}
-                onFocus={(event) => showTurnTooltip(event.currentTarget, message.content)}
-                onBlur={() => setTurnTooltip(null)}
-                onPointerEnter={(event) => showTurnTooltip(event.currentTarget, message.content)}
-                onPointerLeave={() => setTurnTooltip(null)}
-                onClick={() => jumpTo(message.id)}
-              />
-            ))}
+        <>
+          <div className="ai-mode-switch" role="tablist" aria-label="伴学模式">
+            <button
+              className={mode === 'chat' ? 'is-active' : ''}
+              type="button"
+              role="tab"
+              aria-selected={mode === 'chat'}
+              onClick={() => setMode('chat')}
+            >
+              <MessageCircle size={14} />
+              <span>Chat</span>
+            </button>
+            <button
+              className={mode === 'agent' ? 'is-active' : ''}
+              type="button"
+              role="tab"
+              aria-selected={mode === 'agent'}
+              onClick={() => setMode('agent')}
+            >
+              <Sparkles size={14} />
+              <span>Agent</span>
+            </button>
           </div>
-        )}
-      </div>
 
-      <form className="ai-input" onSubmit={handleSubmit}>
-        <input
-          value={input}
-          placeholder={mode === 'chat' ? '和我聊聊复习卡点...' : '让 Agent 检查计划、错题或资料...'}
-          aria-label="输入给 AI 伴学的消息"
-          onChange={(event) => setInput(event.target.value)}
-        />
-        <button type="submit" aria-label={mode === 'chat' ? '发送 Chat 消息' : '发送 Agent 指令'} disabled={!canSend}>
-          <Send size={17} />
-        </button>
-      </form>
+          <div className="ai-scroll-wrap">
+            <div className="ai-scroll" ref={scrollRef} onScroll={handleScroll}>
+              <section className={`companion-card ${mode === 'agent' ? 'is-agent-mode' : ''}` }>
+                <div className="companion-orb">
+                  {mode === 'chat' ? <Bot size={37} /> : <Sparkles size={37} />}
+                </div>
+                {mode === 'chat' ? (
+                  <>
+                    <strong>晚好，冲刺的你很棒！</strong>
+                    <p>我会根据你的资料、作答和时间安排，让每一段复习都更值钱。</p>
+                  </>
+                ) : (
+                  <>
+                    <strong>Agent 模式已待命</strong>
+                    <p>我会把资料、计划和错题串起来，给你拆成下一步可以执行的动作。</p>
+                  </>
+                )}
+              </section>
+
+
+              {mode === 'chat' ? (
+                <section className="chat-history" aria-label="AI 对话记录">
+                  {visibleMessages.map(renderMessage)}
+                </section>
+              ) : (
+                <section className="agent-workbench" aria-label="Agent 操作">
+                  <div className="agent-workbench-heading">
+                    <Sparkles size={18} />
+                    <div>
+                      <span>行动入口</span>
+                      <strong>让 Agent 接管一段复习任务</strong>
+                    </div>
+                  </div>
+                  <div className="agent-prompt-grid">
+                    {agentPrompts.map((prompt) => (
+                      <button type="button" key={prompt} onClick={() => setInput(prompt)}>
+                        {prompt}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="global-course-revision">
+                    <button type="button" className="global-course-revision-trigger" onClick={() => setGlobalEditorOpen((current) => !current)}>
+                      <FilePenLine size={16} />
+                      <span><strong>整体修改当前小节</strong><small>无需划选，可追加、删除或重组这一小节</small></span>
+                    </button>
+                    {globalEditorOpen && (
+                      <div className="global-course-revision-editor">
+                        <p>修改范围：{activeStudyTask && activeStudySection ? `${activeStudyTask.title} · ${activeStudySection.label}` : '尚未打开具体小节'}</p>
+                        <textarea
+                          value={globalComment}
+                          onChange={(event) => setGlobalComment(event.target.value)}
+                          placeholder="例如：在本小节末尾增加一段总结；把这小节改成先例子后原理；补充一个贯穿本小节的类比。"
+                          rows={4}
+                          disabled={globalStatus === 'generating' || globalStatus === 'applying' || globalStatus === 'applied'}
+                        />
+                        {!globalResult && (
+                          <button type="button" className="primary-button" onClick={() => void generateGlobalRevision()} disabled={globalStatus === 'generating'}>
+                            {globalStatus === 'generating' ? '正在分析当前小节...' : '生成小节修改预览'}
+                          </button>
+                        )}
+                        {globalResult && globalStatus !== 'applied' && (
+                          <div className="global-course-revision-preview">
+                            <strong>当前小节修改预览</strong>
+                            <p>{globalResult.proposal.changeSummary}</p>
+                            {globalResult.proposal.rationale && <small>{globalResult.proposal.rationale}</small>}
+                            <div className="proposal-actions">
+                              <button type="button" className="primary-button" onClick={() => void applyGlobalRevision()} disabled={globalStatus === 'applying'}>
+                                {globalStatus === 'applying' ? '应用中...' : '确认应用小节修改'}
+                              </button>
+                              <button type="button" className="secondary-button" onClick={() => { setGlobalResult(null); setGlobalStatus('idle'); setGlobalMessage('') }}>重新填写</button>
+                            </div>
+                          </div>
+                        )}
+                        {globalMessage && <p className={'global-course-revision-message is-' + globalStatus}>{globalMessage}</p>}
+                      </div>
+                    )}
+                  </div>
+                </section>
+              )}
+
+              {mode === 'agent' && visibleMessages.length > 0 && (
+                <section className="chat-history" aria-label="Agent 交互记录">
+                  {visibleMessages.map(renderMessage)}
+                </section>
+              )}
+
+              {sendError && <p className="ai-send-error">{sendError}</p>}
+
+              {mode === 'agent' && proposal && proposal.status === 'pending' && (
+                <section className="proposal-card">
+                  <div className="proposal-heading">
+                    <Sparkles size={18} />
+                    <div>
+                      <span>调整提案</span>
+                      <strong>{proposal.title}</strong>
+                    </div>
+                  </div>
+                  <p>{proposal.reason}</p>
+                  <div className="proposal-impact">{proposal.impact}</div>
+                  <div className="proposal-actions">
+                    <button className="primary-button" type="button" onClick={onApplyProposal}>
+                      <Check size={16} /> 确认调整
+                    </button>
+                    <button className="secondary-button" type="button" onClick={onDismissProposal}>
+                      暂不应用
+                    </button>
+                  </div>
+                </section>
+              )}
+
+              {mode === 'agent' && proposal?.status === 'applied' && (
+                <section className="applied-proposal">
+                  <Check size={17} />
+                  <span>已应用：{proposal.title}</span>
+                </section>
+              )}
+            </div>
+            {userTurns.length >= 1 && (
+              <div className="chat-turn-rail" role="navigation" aria-label="跳转到某一轮对话">
+                {userTurns.map((message, index) => (
+                  <button
+                    key={message.id}
+                    type="button"
+                    className={['chat-turn-dot', index === activeTurnIdx ? 'is-active' : ''].filter(Boolean).join(' ')}
+                    aria-label={`跳转到第 ${index + 1} 轮提问`}
+                    onFocus={(event) => showTurnTooltip(event.currentTarget, message.content)}
+                    onBlur={() => setTurnTooltip(null)}
+                    onPointerEnter={(event) => showTurnTooltip(event.currentTarget, message.content)}
+                    onPointerLeave={() => setTurnTooltip(null)}
+                    onClick={() => jumpTo(message.id)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+
+          <form className="ai-input" onSubmit={handleSubmit}>
+            <textarea
+              ref={inputRef}
+              rows={1}
+              value={input}
+              placeholder={mode === 'chat' ? '和我聊聊复习卡点...' : '让 Agent 检查计划、错题或资料...'}
+              aria-label="输入给 AI 伴学的消息"
+              onChange={(event) => setInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                  event.preventDefault()
+                  void sendMessage()
+                }
+              }}
+            />
+            <button type="submit" aria-label={mode === 'chat' ? '发送 Chat 消息' : '发送 Agent 指令'} disabled={!canSend}>
+              <Send size={17} />
+            </button>
+          </form>
+        </>
+        )
+      ) : (
+        <NotesSidebarPanel note={note} onNoteChange={onNoteChange} />
+      )}
       {turnTooltip && createPortal(
         <div className="chat-turn-tooltip" style={turnTooltip.style}>
           {turnTooltip.content}

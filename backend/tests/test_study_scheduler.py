@@ -181,8 +181,8 @@ def test_schedule_overflow_goes_to_last_day_with_warning():
 
 # ---------- reprioritize_pending ----------
 
-def test_reprioritize_empty_graph_matches_legacy_key():
-    """空图降级 golden：与改造前 (day, mastery[kp], -weight) 排序逐字段一致。"""
+def test_reprioritize_empty_graph_preserves_existing_mainline_order():
+    """空图降级：失分/掌握度不再插队，只保持已生成的 day/order 主线。"""
     points = [
         kp("weak", mastery=20, weight=30),
         kp("strong", mastery=90, weight=10),
@@ -190,19 +190,12 @@ def test_reprioritize_empty_graph_matches_legacy_key():
     ]
     tasks = [
         task("t1", "strong", day=1, order=1),
-        task("t2", "weak", day=1, order=2),
+        task("t2", "weak", day=1, order=2, priority="high"),
         task("t3", "mid", day=2, order=3),
     ]
-    legacy_expected = sorted(
-        tasks,
-        key=lambda t: (
-            t["day"],
-            {"weak": 20, "strong": 90, "mid": 55}.get(t["knowledgePointId"], 100),
-            -t["weight"],
-        ),
-    )
+    expected_ids = ["t1", "t2", "t3"]
     study_scheduler.reprioritize_pending(tasks, points, session_days=[1, 2], daily_minutes=120)
-    assert tasks == legacy_expected
+    assert [t["id"] for t in tasks] == expected_ids
     assert [t["order"] for t in tasks] == [1, 2, 3]
 
 
@@ -222,7 +215,7 @@ def test_reprioritize_failed_kp_cannot_jump_pending_prerequisite():
     assert (adv["day"], adv["order"]) > (basic["day"], basic["order"])
 
 
-def test_reprioritize_unlocks_after_prerequisite_completed():
+def test_reprioritize_does_not_insert_failed_kp_after_prerequisite_completed():
     points = [
         kp("basic"),
         kp("adv", prereqs=["basic"]),
@@ -236,8 +229,8 @@ def test_reprioritize_unlocks_after_prerequisite_completed():
     study_scheduler.reprioritize_pending(tasks, points, session_days=[1, 2, 3], daily_minutes=120)
     adv = next(t for t in tasks if t["knowledgePointId"] == "adv")
     far = next(t for t in tasks if t["knowledgePointId"] == "other")
-    # 前置已完成 → 高优 adv 可越过同层无关知识点 far。
-    assert (adv["day"], adv["order"]) < (far["day"], far["order"])
+    # 前置已完成也不允许高优/失分知识点越过同层主线知识点；失分只加时长/题量。
+    assert (far["day"], far["order"]) < (adv["day"], adv["order"])
 
 
 def test_reprioritize_frozen_tasks_keep_position():
@@ -691,3 +684,32 @@ def test_backup_orientation_guide_zero_issues():
     )
     # 兜底模板必须零 issue 通过自身校验（LLM 失败时功能仍可用）。
     assert _orientation_guide_issues(guide, expected_days=6) == []
+
+def test_schedule_preserves_27_lesson_planner_mainline_across_study_metrics():
+    modules = [
+        {"id": "process", "title": "进程管理", "order": 1},
+        {"id": "memory", "title": "内存管理", "order": 2},
+        {"id": "files", "title": "文件系统", "order": 3},
+    ]
+    points = []
+    tasks = []
+    for index in range(27):
+        module_id = modules[index // 9]["id"]
+        point_id = f"p-{index + 1}"
+        points.append({
+            "id": point_id,
+            "name": point_id,
+            "moduleId": module_id,
+            "difficulty": 5 - (index % 5),
+            "weight": 30 - index,
+            "mastery": (index * 17) % 100,
+            "prerequisites": [f"p-{index}"] if index % 9 and index % 3 == 0 else [],
+        })
+        tasks.append(task(f"t-{index + 1}", point_id, day=index // 3 + 1, order=index + 1, duration=30))
+
+    expected_ids = [item["id"] for item in tasks]
+    study_scheduler.schedule_tasks(tasks, points, session_days=list(range(1, 10)), daily_minutes=90, modules=modules)
+
+    assert [item["id"] for item in tasks] == expected_ids
+    assert [item["order"] for item in tasks] == list(range(1, 28))
+    assert [item["day"] for item in tasks] == [day for day in range(1, 10) for _ in range(3)]

@@ -13,6 +13,7 @@ from ..study_service import (
     load_workspace,
     mark_strategy_maintenance_pending,
     record_time,
+    repair_course_mock_questions,
     save_workspace,
     submit_mock_answers,
     submit_practice_answer,
@@ -42,6 +43,7 @@ class TimeLogRequest(BaseModel):
     minutes: int = Field(ge=1, le=1440)
     target_date: str = Field(default="", max_length=10)
     note: str = Field(default="", max_length=200)
+    client_entry_id: str = Field(default="", max_length=160)
 
 
 @router.post("/api/courses/{course_id}/time-log")
@@ -57,6 +59,7 @@ def add_course_time_log(
             minutes=payload.minutes,
             target_date=payload.target_date.strip() or None,
             note=payload.note,
+            client_entry_id=payload.client_entry_id.strip() or None,
         )
     except FileNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
@@ -146,6 +149,23 @@ def retry_course_wrong_answer(
         return result
     except KeyError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@router.post("/api/courses/{course_id}/mock/repair")
+def repair_course_mock(
+    course_id: str,
+    force: bool = False,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
+    try:
+        return repair_course_mock_questions(course_id, force=force)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except RuntimeError as error:
+        status_code = 409 if "正在运行" in str(error) or "其他操作更新" in str(error) else 502
+        raise HTTPException(status_code=status_code, detail=str(error)) from error
 
 
 @router.post("/api/courses/{course_id}/mock/submit")

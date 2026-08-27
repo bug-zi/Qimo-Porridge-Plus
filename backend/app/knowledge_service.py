@@ -78,6 +78,8 @@ def initialize_knowledge_database() -> None:
                 name TEXT NOT NULL,
                 content_hash TEXT NOT NULL,
                 character_count INTEGER NOT NULL,
+                role TEXT NOT NULL DEFAULT 'supplementary',
+                priority_order INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (course_id, relative_path)
             );
@@ -92,11 +94,12 @@ def initialize_knowledge_database() -> None:
                 heading TEXT NOT NULL,
                 content TEXT NOT NULL,
                 content_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'supplementary',
+                priority_order INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_material_chunks_course
                 ON material_chunks (course_id, relative_path, chunk_index);
-
             CREATE TABLE IF NOT EXISTS chat_turns (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 external_id TEXT UNIQUE,
@@ -181,6 +184,25 @@ def initialize_knowledge_database() -> None:
             connection.execute(
                 "ALTER TABLE chat_turns ADD COLUMN conversation_mode TEXT NOT NULL DEFAULT 'chat'"
             )
+        for table_name in ("knowledge_materials", "material_chunks"):
+            table_columns = {
+                str(row["name"])
+                for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+            }
+            if "role" not in table_columns:
+                connection.execute(
+                    f"ALTER TABLE {table_name} ADD COLUMN role TEXT NOT NULL DEFAULT 'supplementary'"
+                )
+            if "priority_order" not in table_columns:
+                connection.execute(
+                    f"ALTER TABLE {table_name} ADD COLUMN priority_order INTEGER NOT NULL DEFAULT 0"
+                )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_material_chunks_role
+                ON material_chunks (course_id, role, priority_order)
+            """
+        )
         try:
             connection.execute(
                 """
@@ -381,20 +403,30 @@ def _request_embeddings(texts: list[str]) -> list[list[float]]:
     return vectors
 
 
-def _embedding_counts(model: str) -> tuple[int, int, int]:
+def _embedding_counts(model: str, course_id: str | None = None) -> tuple[int, int, int]:
     with _database_connection() as connection:
-        total = int(connection.execute("SELECT COUNT(*) FROM material_chunks").fetchone()[0])
+        if course_id is None:
+            chunk_rows = connection.execute("SELECT id FROM material_chunks").fetchall()
+        else:
+            chunk_rows = connection.execute(
+                "SELECT id FROM material_chunks WHERE course_id = ?", (course_id,)
+            ).fetchall()
+    chunk_ids = [str(row[0]) for row in chunk_rows]
+    if not chunk_ids:
+        return 0, 0, 0
+    placeholders = ",".join("?" for _ in chunk_ids)
     with _embedding_connection() as connection:
         row = connection.execute(
-            "SELECT COUNT(*), COALESCE(MAX(dimension), 0) FROM chunk_embeddings WHERE model = ?",
-            (model,),
+            f"SELECT COUNT(*), COALESCE(MAX(dimension), 0) FROM chunk_embeddings "
+            f"WHERE model = ? AND chunk_id IN ({placeholders})",
+            (model, *chunk_ids),
         ).fetchone()
-    return int(row[0]), total, int(row[1])
+    return int(row[0]), len(chunk_ids), int(row[1])
 
 
-def get_embedding_status(*, probe: bool = True) -> dict[str, Any]:
+def get_embedding_status(*, probe: bool = True, course_id: str | None = None) -> dict[str, Any]:
     config = _read_embedding_config()
-    indexed, total, dimension = _embedding_counts(str(config["model"]))
+    indexed, total, dimension = _embedding_counts(str(config["model"]), course_id)
     result = {
         **config,
         "status": "disabled" if not config.get("enabled") else "unavailable",
@@ -523,6 +555,8 @@ def sync_material_documents(course_id: str, documents: list[dict[str, str]]) -> 
                     "relativePath": relative_path,
                     "name": str(document.get("name") or Path(relative_path).name),
                     "text": text,
+                    "role": str(document.get("role") or "supplementary") if str(document.get("role") or "supplementary") in {"primary", "supplementary"} else "supplementary",
+                    "priorityOrder": int(document.get("priorityOrder") or 0),
                     "contentHash": _content_hash(text),
                 }
             )
@@ -531,9 +565,13 @@ def sync_material_documents(course_id: str, documents: list[dict[str, str]]) -> 
     changed_count = 0
     with _database_connection() as connection:
         existing = {
-            row["relative_path"]: row["content_hash"]
+            row["relative_path"]: {
+                "contentHash": row["content_hash"],
+                "role": str(row["role"] if "role" in row.keys() else "supplementary"),
+                "priorityOrder": int(row["priority_order"] if "priority_order" in row.keys() else 0),
+            }
             for row in connection.execute(
-                "SELECT relative_path, content_hash FROM knowledge_materials WHERE course_id = ?",
+                "SELECT relative_path, content_hash, role, priority_order FROM knowledge_materials WHERE course_id = ?",
                 (course_id,),
             )
         }
@@ -565,7 +603,13 @@ def sync_material_documents(course_id: str, documents: list[dict[str, str]]) -> 
 
         for document in normalized_documents:
             relative_path = document["relativePath"]
-            if existing.get(relative_path) == document["contentHash"]:
+            existing_item = existing.get(relative_path)
+            if (
+                existing_item
+                and existing_item.get("contentHash") == document["contentHash"]
+                and existing_item.get("role") == document["role"]
+                and int(existing_item.get("priorityOrder") or 0) == int(document["priorityOrder"] or 0)
+            ):
                 continue
             changed_count += 1
             old_rows = connection.execute(
@@ -597,8 +641,8 @@ def sync_material_documents(course_id: str, documents: list[dict[str, str]]) -> 
                     """
                     INSERT INTO material_chunks (
                         id, course_id, relative_path, material_name, chunk_index,
-                        locator, heading, content, content_hash, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        locator, heading, content, content_hash, role, priority_order, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         chunk_id,
@@ -610,6 +654,8 @@ def sync_material_documents(course_id: str, documents: list[dict[str, str]]) -> 
                         heading,
                         chunk["content"],
                         chunk_hash,
+                        document["role"],
+                        document["priorityOrder"],
                         _now(),
                     ),
                 )
@@ -623,8 +669,8 @@ def sync_material_documents(course_id: str, documents: list[dict[str, str]]) -> 
             connection.execute(
                 """
                 INSERT OR REPLACE INTO knowledge_materials (
-                    course_id, relative_path, name, content_hash, character_count, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    course_id, relative_path, name, content_hash, character_count, role, priority_order, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     course_id,
@@ -632,6 +678,8 @@ def sync_material_documents(course_id: str, documents: list[dict[str, str]]) -> 
                     document["name"],
                     document["contentHash"],
                     len(document["text"]),
+                    document["role"],
+                    document["priorityOrder"],
                     _now(),
                 ),
             )
@@ -698,7 +746,7 @@ def rebuild_course_embeddings(course_id: str) -> dict[str, Any]:
                 ],
             )
     _invalidate_vector_cache(model)
-    status = get_embedding_status(probe=False)
+    status = get_embedding_status(probe=False, course_id=course_id)
     return {
         **status,
         "status": "ready",
@@ -907,8 +955,8 @@ def sample_material_chunks(course_id: str, *, max_characters: int = 15000) -> st
     initialize_knowledge_database()
     with _database_connection() as connection:
         rows = connection.execute(
-            "SELECT material_name, locator, content FROM material_chunks "
-            "WHERE course_id = ? ORDER BY relative_path, chunk_index",
+            "SELECT material_name, locator, content, role, priority_order FROM material_chunks "
+            "WHERE course_id = ? ORDER BY CASE role WHEN 'primary' THEN 0 ELSE 1 END, priority_order, relative_path, chunk_index",
             (course_id,),
         ).fetchall()
     if not rows:
@@ -925,7 +973,7 @@ def sample_material_chunks(course_id: str, *, max_characters: int = 15000) -> st
         if not piece:
             continue
         seen_counts[name] = seen_counts.get(name, 0) + 1
-        prefix = f"[来源：{name} · {row['locator']}]"
+        prefix = f"[来源：{name} · {row['locator']}；资料角色：{'主资料' if str(row['role']) == 'primary' else '辅资料'}]"
         segment = f"{prefix}\n{piece}"
         if total + len(segment) > max_characters:
             break
@@ -967,6 +1015,10 @@ def retrieve_material_context(course_id: str, query: str, *, limit: int = 6) -> 
             semantic_used = False
             _EMBEDDING_UNAVAILABLE_UNTIL = time.monotonic() + 30
 
+    for chunk_id, row in list(row_by_id.items()):
+        role = str(row["role"] if "role" in row.keys() else "supplementary")
+        if role == "primary":
+            ranks[chunk_id] = ranks.get(chunk_id, 0) * 1.35 + 0.01
     ranked_ids = sorted(ranks, key=lambda chunk_id: ranks[chunk_id], reverse=True)[:limit]
     items = []
     for chunk_id in ranked_ids:
@@ -979,10 +1031,11 @@ def retrieve_material_context(course_id: str, query: str, *, limit: int = 6) -> 
                 "locator": str(row["locator"]),
                 "citation": citation,
                 "content": str(row["content"]),
+                "role": str(row["role"] if "role" in row.keys() else "supplementary"),
             }
         )
     context = "\n\n".join(
-        f"[来源：{item['citation']}]\n{item['content']}" for item in items
+        f"[来源：{item['citation']}；资料角色：{'主资料' if item.get('role') == 'primary' else '辅资料'}]\n{item['content']}" for item in items
     )
     return {"items": items, "context": context, "semanticUsed": semantic_used}
 
@@ -1482,5 +1535,5 @@ def get_knowledge_status(course_id: str) -> dict[str, Any]:
         "chatTurns": chats,
         "learningEvents": events,
         "memories": memories,
-        "embedding": get_embedding_status(probe=False),
+        "embedding": get_embedding_status(probe=False, course_id=course_id),
     }
