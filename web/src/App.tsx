@@ -69,6 +69,7 @@ import {
   refineCourseFeedbackRewrite,
   submitCourseFeedback,
   submitGlobalCourseFeedback,
+  refineGlobalCourseFeedback,
   submitCourseDiagnostic,
   submitCourseMockAnswers,
   submitCoursePracticeAnswer,
@@ -1124,6 +1125,11 @@ function App() {
     return submitGlobalCourseFeedback(activeWorkspace.course.id, taskId, sectionId, sectionIndex, userComment)
   }
 
+  async function handleRefineGlobalCourseFeedback(feedbackId: string, extraComment: string) {
+    if (!activeWorkspace) throw new Error('当前课程尚未加载。')
+    return refineGlobalCourseFeedback(activeWorkspace.course.id, feedbackId, extraComment)
+  }
+
   async function handleApplyGlobalCourseFeedback(feedbackId: string) {
     if (!activeWorkspace) throw new Error('当前课程尚未加载。')
     const result = await applyGlobalCourseFeedback(activeWorkspace.course.id, feedbackId)
@@ -2148,6 +2154,7 @@ function App() {
         activeStudyTask={activeStudyTaskId ? activeWorkspace.tasks.find((task) => task.id === activeStudyTaskId) ?? null : null}
         activeStudySection={activeStudySection}
         onSubmitGlobalCourseFeedback={handleSubmitGlobalCourseFeedback}
+        onRefineGlobalCourseFeedback={handleRefineGlobalCourseFeedback}
         onApplyGlobalCourseFeedback={handleApplyGlobalCourseFeedback}
         onNoteChange={updateNote}
         streamingMessage={streamingMessage}

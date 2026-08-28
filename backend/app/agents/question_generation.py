@@ -5,6 +5,7 @@ import random
 import re
 from typing import Any
 
+from .answer_consistency import reconcile_question_answer
 from .formula_rules import with_structured_formula_rules
 from .workflow_types import JsonModelCall
 from ..knowledge_service import retrieve_material_context
@@ -12,6 +13,9 @@ from ..knowledge_service import retrieve_material_context
 def _shuffle_single_choice_options(question: dict[str, Any]) -> dict[str, Any]:
     if str(question.get("type", "single")) != "single":
         return question
+    # Resolve a strict, explicit explanation/answerIndex conflict before the
+    # options move; otherwise shuffling faithfully preserves the wrong key.
+    reconcile_question_answer(question)
     options = question.get("options")
     answer_index = question.get("answerIndex")
     if not isinstance(options, list) or len(options) < 2:

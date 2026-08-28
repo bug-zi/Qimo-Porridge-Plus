@@ -1062,6 +1062,66 @@ def submit_global_course_feedback(
         entries = _read_feedback_entries(course_id); feedback = _find_feedback(entries, feedback_id); feedback["globalRewriteError"] = str(error); feedback["analysisError"] = str(error); _write_feedback_entries(course_id, entries); raise
 
 
+def refine_global_course_feedback(
+    course_id: str, feedback_id: str, *, extra_comment: str, model_json: JsonModelCall,
+) -> dict[str, Any]:
+    """Refine the latest section proposal while retaining the same feedback session."""
+    from .study_service import load_workspace
+
+    comment = _clip_text(extra_comment, MAX_USER_COMMENT_LENGTH)
+    if not comment:
+        raise ValueError("请填写希望继续调整的要求")
+    entries = _read_feedback_entries(course_id)
+    feedback = _find_feedback(entries, feedback_id)
+    session = feedback.get("rewriteSession") if isinstance(feedback.get("rewriteSession"), dict) else {}
+    previous = session.get("latestProposal") if isinstance(session.get("latestProposal"), dict) else None
+    if not previous or not isinstance(previous.get("revisedSection"), dict):
+        raise ValueError("找不到可继续修改的小节方案")
+
+    workspace = load_workspace(course_id, refresh_materials=False)
+    task_id = str(previous.get("taskId") or "")
+    task = next((item for item in workspace.get("tasks", []) if isinstance(item, dict) and str(item.get("id")) == task_id), None)
+    if not task or not isinstance(task.get("studyGuide"), dict):
+        raise ValueError("当前任务没有可修改的讲义内容")
+    guide = task["studyGuide"]
+    if _guide_revision_token(guide) != str(previous.get("baseRevision") or ""):
+        raise ValueError("课程内容已发生变化，请重新发起小节修改")
+
+    attempts = session.get("attempts") if isinstance(session.get("attempts"), list) else []
+    conversation = [
+        {"role": "user", "content": str(item.get("inputComment") or "")}
+        for item in attempts if isinstance(item, dict) and str(item.get("inputComment") or "").strip()
+    ]
+    task_prompt = """
+你是 Lesson Section Revision Agent。用户正在围绕同一个课程小节进行多轮修改。请在上一版候选小节上继续修改，不得改动另外三个小节。
+只返回 JSON：
+{"revisedSection":{"保持上一版小节字段结构并完成修改":"..."},"changeSummary":"简短摘要","rationale":"修改理由"}
+要求：把本轮意见与历史意见结合，除非用户明确撤销，否则保留前几轮已要求的改动；revisedSection 必须完整；保持字段类型、事实、公式和题目条件；不要返回整篇 studyGuide；只输出 JSON。
+"""
+    payload = {
+        "task": {"id": task_id, "title": task.get("title")},
+        "section": {"id": previous.get("sectionId"), "index": previous.get("sectionIndex")},
+        "originalSection": _resolve_guide_section(guide, str(previous.get("sectionId") or ""), int(previous.get("sectionIndex") or 0))[1],
+        "previousRevisedSection": previous["revisedSection"],
+        "conversation": conversation,
+        "latestUserComment": comment,
+        "languageRules": get_course_feedback_rules_prompt(course_id),
+    }
+    generated = model_json(task_prompt, json.dumps(payload, ensure_ascii=False, separators=(",", ":")), "")
+    revised = generated.get("revisedSection") if isinstance(generated, dict) else None
+    if not isinstance(revised, dict) or not revised:
+        raise ValueError("小节修改 Agent 没有返回完整 revisedSection")
+    proposal = {
+        **previous,
+        "changeSummary": _clip_text(generated.get("changeSummary") or "已根据补充意见更新小节方案", 1000),
+        "rationale": _clip_text(generated.get("rationale"), 1000),
+        "revisedSection": revised,
+        "createdAt": _now_iso(),
+    }
+    _append_rewrite_attempt(course_id, feedback_id, proposal, comment, "section_refined")
+    return {"feedbackId": feedback_id, "status": "analyzed", "message": "已结合对话上下文更新当前小节修改预览。", "proposal": proposal}
+
+
 def apply_global_course_feedback(course_id: str, feedback_id: str) -> dict[str, Any]:
     from .study_service import _build_study_guide_sections, load_workspace, save_workspace
     entries = _read_feedback_entries(course_id); feedback = _find_feedback(entries, feedback_id)

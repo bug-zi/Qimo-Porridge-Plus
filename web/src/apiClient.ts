@@ -30,6 +30,7 @@ export const cancelAgentJob = impl.cancelAgentJob
 export const saveCoursePrompt = impl.saveCoursePrompt
 export const submitCourseFeedback = impl.submitCourseFeedback
 export const submitGlobalCourseFeedback = impl.submitGlobalCourseFeedback
+export const refineGlobalCourseFeedback = impl.refineGlobalCourseFeedback
 export const applyGlobalCourseFeedback = impl.applyGlobalCourseFeedback
 export const getCourseFeedbackRules = impl.getCourseFeedbackRules
 export const refineCourseFeedbackRewrite = impl.refineCourseFeedbackRewrite

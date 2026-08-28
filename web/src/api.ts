@@ -367,6 +367,13 @@ export function submitGlobalCourseFeedback(courseId: string, taskId: string, sec
   }, 180000)
 }
 
+export function refineGlobalCourseFeedback(courseId: string, feedbackId: string, extraComment: string) {
+  return request<GlobalCourseFeedbackResult>(`/courses/${encodeURIComponent(courseId)}/course-feedback/${encodeURIComponent(feedbackId)}/global/refine`, {
+    method: 'POST',
+    body: JSON.stringify({ extra_comment: extraComment }),
+  }, 180000)
+}
+
 export function applyGlobalCourseFeedback(courseId: string, feedbackId: string) {
   return request<CourseFeedbackApplyResult>(`/courses/${encodeURIComponent(courseId)}/course-feedback/${encodeURIComponent(feedbackId)}/global/apply`, {
     method: 'POST',

@@ -919,6 +919,18 @@ const demoApi: ApiSurface = {
     }
   },
 
+  async refineGlobalCourseFeedback(courseId, feedbackId, extraComment) {
+    await delay(300)
+    await loadSnapshot()
+    const task = decoratedWorkspace(courseId).tasks.find((item) => item.studyGuide)
+    if (!task?.studyGuide) throw new Error('当前任务没有可修改的讲义内容')
+    const revisedSection = JSON.parse(JSON.stringify(task.studyGuide.sections?.[0] ?? { id: 'exam-focus', label: '第 1 小节' }))
+    return {
+      feedbackId, status: 'analyzed', message: '演示模式：已结合补充意见更新小节预览。',
+      proposal: { feedbackId, taskId: task.id, taskTitle: task.title, sectionId: revisedSection.id ?? 'exam-focus', sectionIndex: 0, sectionLabel: revisedSection.label ?? '第 1 小节', changeSummary: `继续修改：${extraComment}`, rationale: '演示多轮小节修改。', revisedSection, baseRevision: 'demo', createdAt: nowIso() },
+    }
+  },
+
   async applyGlobalCourseFeedback(courseId, feedbackId) {
     await delay(220)
     await loadSnapshot()

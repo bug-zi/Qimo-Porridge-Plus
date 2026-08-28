@@ -75,3 +75,30 @@ def test_apply_subsection_rejects_stale_course(monkeypatch) -> None:
     try: service.apply_global_course_feedback("c", "f")
     except ValueError as error: assert "已发生变化" in str(error)
     else: raise AssertionError("stale proposal should fail")
+
+def test_refine_subsection_keeps_session_and_previous_candidate(monkeypatch) -> None:
+    workspace = _workspace(); entries, _rules = _stores(monkeypatch, workspace)
+    first = service.submit_global_course_feedback(
+        "course-1", task_id="task-1", section_id="method", section_index=1,
+        user_comment="先增加总结", model_json=_model(workspace),
+    )
+    captured: dict = {}
+
+    def refine_model(_task_prompt: str, payload_text: str, _system: str) -> dict:
+        import json
+        payload = json.loads(payload_text); captured.update(payload)
+        revised = deepcopy(payload["previousRevisedSection"])
+        revised["concepts"][-1]["body"] = "压缩后的总结"
+        return {"revisedSection": revised, "changeSummary": "总结已压缩", "rationale": "更便于冲刺"}
+
+    refined = service.refine_global_course_feedback(
+        "course-1", first["feedbackId"], extra_comment="总结再短一些", model_json=refine_model,
+    )
+
+    assert refined["feedbackId"] == first["feedbackId"]
+    assert refined["proposal"]["revisedSection"]["concepts"][-1]["body"] == "压缩后的总结"
+    assert captured["previousRevisedSection"] == first["proposal"]["revisedSection"]
+    assert captured["conversation"] == [{"role": "user", "content": "先增加总结"}]
+    assert captured["latestUserComment"] == "总结再短一些"
+    assert len(entries[0]["rewriteSession"]["attempts"]) == 2
+    assert entries[0]["rewriteSession"]["attempts"][-1]["inputComment"] == "总结再短一些"

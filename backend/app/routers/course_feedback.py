@@ -11,6 +11,7 @@ from ..course_feedback_service import (
     get_course_feedback_rules,
     list_course_feedback,
     refine_course_feedback_rewrite,
+    refine_global_course_feedback,
     submit_course_feedback_with_rewrite,
     submit_global_course_feedback,
 )
@@ -131,6 +132,23 @@ def create_global_course_feedback(
 ) -> dict[str, Any]:
     try:
         return submit_global_course_feedback(course_id, task_id=payload.task_id, section_id=payload.section_id, section_index=payload.section_index, user_comment=payload.user_comment, model_json=_model_json)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+class GlobalCourseFeedbackRefineRequest(BaseModel):
+    extra_comment: str = Field(min_length=1, max_length=2000)
+
+
+@router.post("/api/courses/{course_id}/course-feedback/{feedback_id}/global/refine")
+def refine_global_feedback(
+    course_id: str,
+    feedback_id: str,
+    payload: GlobalCourseFeedbackRefineRequest,
+    _owner_id: str = Depends(require_course_ownership),
+) -> dict[str, Any]:
+    try:
+        return refine_global_course_feedback(course_id, feedback_id, extra_comment=payload.extra_comment, model_json=_model_json)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 

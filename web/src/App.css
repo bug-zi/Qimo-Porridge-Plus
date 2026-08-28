@@ -6143,6 +6143,11 @@ code .formula-symbol sup {
   font-size: 11px;
   line-height: 1.5;
 }
+.global-course-revision-conversation { display: grid; gap: 6px; max-height: 220px; overflow-y: auto; padding-right: 2px; }
+.global-course-revision-conversation > div { display: grid; gap: 3px; padding: 7px 8px; border-radius: 8px; background: var(--surface-muted); }
+.global-course-revision-conversation > .is-user { margin-left: 18px; background: color-mix(in srgb, var(--agent-accent) 10%, var(--surface)); }
+.global-course-revision-conversation strong { color: var(--text-muted); font-size: 9px; }
+.global-course-revision-conversation p { margin: 0; white-space: pre-wrap; color: var(--text); font-size: 10px; line-height: 1.45; }
 .global-course-revision-editor textarea:focus { border-color: var(--agent-accent); }
 .global-course-revision-editor .primary-button { min-height: 34px; justify-content: center; }
 .global-course-revision-preview { display: grid; gap: 6px; padding: 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-muted); }

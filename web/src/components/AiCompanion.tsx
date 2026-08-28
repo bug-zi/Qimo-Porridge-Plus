@@ -31,6 +31,7 @@ type AiCompanionProps = {
   activeStudyTask: PlanTask | null
   activeStudySection: { index: number; id: string; label: string; title: string } | null
   onSubmitGlobalCourseFeedback: (taskId: string, sectionId: string, sectionIndex: number, userComment: string) => Promise<GlobalCourseFeedbackResult>
+  onRefineGlobalCourseFeedback: (feedbackId: string, extraComment: string) => Promise<GlobalCourseFeedbackResult>
   onApplyGlobalCourseFeedback: (feedbackId: string) => Promise<string | void>
   onNoteChange: (note: string) => void
   streamingMessage?: StreamingMessage | null
@@ -206,6 +207,7 @@ export function AiCompanion({
   activeStudyTask,
   activeStudySection,
   onSubmitGlobalCourseFeedback,
+  onRefineGlobalCourseFeedback,
   onApplyGlobalCourseFeedback,
   onNoteChange,
   streamingMessage,
@@ -221,6 +223,7 @@ export function AiCompanion({
   const [globalResult, setGlobalResult] = useState<GlobalCourseFeedbackResult | null>(null)
   const [globalStatus, setGlobalStatus] = useState<'idle' | 'generating' | 'preview' | 'applying' | 'applied' | 'error'>('idle')
   const [globalMessage, setGlobalMessage] = useState('')
+  const [globalConversation, setGlobalConversation] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([])
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
   const stickRef = useRef(true) // 是否贴底跟随（用户上翻回看时为 false）
@@ -310,6 +313,14 @@ export function AiCompanion({
     })
   }
 
+  useEffect(() => {
+    setGlobalResult(null)
+    setGlobalConversation([])
+    setGlobalComment('')
+    setGlobalStatus('idle')
+    setGlobalMessage('')
+  }, [activeStudyTask?.id, activeStudySection?.id, activeStudySection?.index])
+
   // 智能粘底：首次挂载强制贴底；之后仅在用户本就贴底时跟随流式增量
   useEffect(() => {
     const el = scrollRef.current
@@ -380,11 +391,38 @@ export function AiCompanion({
     try {
       const result = await onSubmitGlobalCourseFeedback(activeStudyTask.id, activeStudySection.id, activeStudySection.index, comment)
       setGlobalResult(result)
+      setGlobalConversation([
+        { role: 'user', content: comment },
+        { role: 'assistant', content: result.proposal.changeSummary + (result.proposal.rationale ? `\n${result.proposal.rationale}` : '') },
+      ])
+      setGlobalComment('')
       setGlobalStatus('preview')
       setGlobalMessage(result.message)
     } catch (error) {
       setGlobalStatus('error')
       setGlobalMessage(error instanceof Error ? error.message : '小节修改生成失败，请稍后再试。')
+    }
+  }
+
+  async function refineGlobalRevision() {
+    const comment = globalComment.trim()
+    if (!globalResult || !comment || globalStatus === 'generating') return
+    setGlobalStatus('generating')
+    setGlobalMessage('')
+    try {
+      const result = await onRefineGlobalCourseFeedback(globalResult.feedbackId, comment)
+      setGlobalResult(result)
+      setGlobalConversation((current) => [
+        ...current,
+        { role: 'user', content: comment },
+        { role: 'assistant', content: result.proposal.changeSummary + (result.proposal.rationale ? `\n${result.proposal.rationale}` : '') },
+      ])
+      setGlobalComment('')
+      setGlobalStatus('preview')
+      setGlobalMessage(result.message)
+    } catch (error) {
+      setGlobalStatus('preview')
+      setGlobalMessage(error instanceof Error ? error.message : '继续修改失败，请稍后再试。')
     }
   }
 
@@ -592,18 +630,31 @@ export function AiCompanion({
                     {globalEditorOpen && (
                       <div className="global-course-revision-editor">
                         <p>修改范围：{activeStudyTask && activeStudySection ? `${activeStudyTask.title} · ${activeStudySection.label}` : '尚未打开具体小节'}</p>
+                        {globalConversation.length > 0 && (
+                          <div className="global-course-revision-conversation" aria-label="小节修改对话记录">
+                            {globalConversation.map((turn, index) => (
+                              <div key={index} className={'is-' + turn.role}>
+                                <strong>{turn.role === 'user' ? '你' : 'AI'}</strong>
+                                <p>{turn.content}</p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                         <textarea
                           value={globalComment}
                           onChange={(event) => setGlobalComment(event.target.value)}
-                          placeholder="例如：在本小节末尾增加一段总结；把这小节改成先例子后原理；补充一个贯穿本小节的类比。"
+                          placeholder={globalResult ? '继续告诉 AI 如何调整这一版，例如：总结再短一些，并保留刚才的例子。' : '例如：在本小节末尾增加一段总结；把这小节改成先例子后原理。'}
                           rows={4}
                           disabled={globalStatus === 'generating' || globalStatus === 'applying' || globalStatus === 'applied'}
                         />
-                        {!globalResult && (
-                          <button type="button" className="primary-button" onClick={() => void generateGlobalRevision()} disabled={globalStatus === 'generating'}>
-                            {globalStatus === 'generating' ? '正在分析当前小节...' : '生成小节修改预览'}
-                          </button>
-                        )}
+                        <button
+                          type="button"
+                          className="primary-button"
+                          onClick={() => void (globalResult ? refineGlobalRevision() : generateGlobalRevision())}
+                          disabled={globalStatus === 'generating' || globalStatus === 'applying' || !globalComment.trim()}
+                        >
+                          {globalStatus === 'generating' ? 'AI 正在调整小节...' : globalResult ? '发送补充意见并更新预览' : '生成小节修改预览'}
+                        </button>
                         {globalResult && globalStatus !== 'applied' && (
                           <div className="global-course-revision-preview">
                             <strong>当前小节修改预览</strong>
@@ -613,7 +664,7 @@ export function AiCompanion({
                               <button type="button" className="primary-button" onClick={() => void applyGlobalRevision()} disabled={globalStatus === 'applying'}>
                                 {globalStatus === 'applying' ? '应用中...' : '确认应用小节修改'}
                               </button>
-                              <button type="button" className="secondary-button" onClick={() => { setGlobalResult(null); setGlobalStatus('idle'); setGlobalMessage('') }}>重新填写</button>
+                              <button type="button" className="secondary-button" onClick={() => { setGlobalResult(null); setGlobalConversation([]); setGlobalComment(''); setGlobalStatus('idle'); setGlobalMessage('') }}>开始新对话</button>
                             </div>
                           </div>
                         )}
