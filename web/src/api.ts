@@ -55,6 +55,7 @@ function encodeMaterialPath(relativePath: string) {
 type RuntimeModel = {
   baseUrl: string
   model: string
+  apiKey?: string
   connected: boolean
   hasApiKey?: boolean
   availableModels?: string[]
@@ -545,6 +546,7 @@ export function saveModelProfile(provider: string, payload: { baseUrl: string; a
 export type BackupModelProfile = {
   baseUrl: string
   model: string
+  apiKey?: string
   hasApiKey: boolean
   connected: boolean
 }
@@ -1176,7 +1178,7 @@ export function toRuntimeModelProfile(
     provider: 'custom',
     baseUrl: runtimeModel.baseUrl,
     model: runtimeModel.model,
-    apiKey: '',
+    apiKey: runtimeModel.apiKey ?? '',
     hasApiKey: runtimeModel.hasApiKey,
     availableModels: runtimeModel.availableModels,
     supportsVision: true,

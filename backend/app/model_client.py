@@ -194,6 +194,7 @@ def get_backup_model_profile() -> dict[str, Any]:
     return {
         "baseUrl": backup["base_url"].rstrip("/"),
         "model": backup["model"],
+        "apiKey": backup["api_key"],
         "hasApiKey": bool(backup["api_key"].strip()),
         "connected": bool(backup["base_url"].strip() and backup["api_key"].strip() and backup["model"].strip()),
     }

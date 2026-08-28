@@ -46,6 +46,7 @@ import * as localApi from '../api'
 type RuntimeModel = {
   baseUrl: string
   model: string
+  apiKey?: string
   connected: boolean
   hasApiKey?: boolean
   availableModels?: string[]
@@ -101,7 +102,7 @@ type DemoSnapshot = {
   archive: ArchiveItemApiResponse[]
   runtimeModel: RuntimeModel
   modelProfiles?: { active: string; profiles: Record<string, { baseUrl: string; model: string; hasApiKey: boolean }> }
-  backupModel?: { baseUrl: string; model: string; hasApiKey: boolean; connected: boolean }
+  backupModel?: { baseUrl: string; model: string; apiKey?: string; hasApiKey: boolean; connected: boolean }
   userProfile: UserProfilePrompt
   accountProfile?: AccountProfile
   embeddingProfile: EmbeddingProfile
@@ -1581,7 +1582,7 @@ const demoApi: ApiSurface = {
       provider: 'custom',
       baseUrl: runtimeModel.baseUrl,
       model: runtimeModel.model,
-      apiKey: '',
+      apiKey: runtimeModel.apiKey ?? '',
       hasApiKey: runtimeModel.hasApiKey,
       availableModels: runtimeModel.availableModels,
       supportsVision: true,

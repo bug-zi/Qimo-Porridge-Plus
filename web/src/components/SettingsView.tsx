@@ -368,6 +368,7 @@ export function SettingsView({
             ...current,
             baseUrl: backup.baseUrl,
             model: backup.model,
+            apiKey: backup.apiKey ?? '',
             hasApiKey: backup.hasApiKey,
             connected: backup.connected,
           }))
@@ -567,7 +568,7 @@ export function SettingsView({
       setSavedProfiles(profiles)
       const nextProfile: ModelProfile = {
         ...draft,
-        apiKey: '',
+        apiKey: draft.apiKey,
         hasApiKey: true,
         status: 'saved',
         statusMessage: `配置已保存到本机（当前使用 ${getProviderPreset(draft.provider).label}）`,
@@ -630,7 +631,7 @@ export function SettingsView({
         apiKey: backupDraft.apiKey,
         model: backupDraft.model,
       })
-      setBackupDraft((current) => ({ ...current, apiKey: '', hasApiKey: saved.hasApiKey, connected: saved.connected, baseUrl: saved.baseUrl, model: saved.model }))
+      setBackupDraft((current) => ({ ...current, apiKey: current.apiKey || backupDraft.apiKey, hasApiKey: saved.hasApiKey, connected: saved.connected, baseUrl: saved.baseUrl, model: saved.model }))
       setBackupMessage(saved.connected ? '备用模型已保存，主模型失败时将自动切换。' : '备用模型已保存，但配置不完整（缺少 API Key 或模型名）。')
     } catch (error) {
       setBackupMessage(error instanceof Error ? error.message : '备用模型保存失败')
@@ -1115,7 +1116,7 @@ export function SettingsView({
                 <input
                   type={isApiKeyVisible ? 'text' : 'password'}
                   value={draft.apiKey}
-                  placeholder={draft.hasApiKey ? '已保存到本机，留空继续使用' : '仅保存在本机'}
+                  placeholder={draft.hasApiKey ? '···' : '仅保存在本机'}
                   autoComplete="off"
                   onChange={(event) => updateDraft('apiKey', event.target.value)}
                 />
@@ -1214,7 +1215,7 @@ export function SettingsView({
                   <input
                     type={isApiKeyVisible ? 'text' : 'password'}
                     value={backupDraft.apiKey}
-                    placeholder={backupDraft.hasApiKey ? '已保存到本机，留空继续使用' : '仅保存在本机'}
+                    placeholder={backupDraft.hasApiKey ? '···' : '仅保存在本机'}
                     autoComplete="off"
                     onChange={(event) => setBackupDraft((current) => ({ ...current, apiKey: event.target.value }))}
                   />

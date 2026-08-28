@@ -229,6 +229,7 @@ def get_runtime_model_profile() -> dict[str, str | bool | list[str]]:
     return {
         "baseUrl": base_url,
         "model": model,
+        "apiKey": api_key,
         "connected": bool(base_url and api_key and model),
         "hasApiKey": bool(api_key),
         "availableModels": available_models,
@@ -297,7 +298,7 @@ def _activate_model_profile_values(base_url: str, api_key: str, model: str) -> N
 
 
 def get_model_profiles() -> dict[str, Any]:
-    """读取全部档案（API Key 只回传 hasApiKey 布尔，不回传明文）。"""
+    """读取全部档案，供本机设置页显示当前 API Key。"""
     store = _load_model_profile_store()
     active = store["active"]
     if not active:
