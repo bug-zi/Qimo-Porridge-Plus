@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import material_parser, materials, model_profiles, paths, study_service
+from app import material_parser, materials, model_profiles, paths, practice, study_service
 
 
 def test_paths_module_is_sole_owner_of_directory_constants() -> None:
@@ -205,3 +205,39 @@ def test_workspace_module_does_not_import_study_service() -> None:
     from app import workspace
 
     assert "study_service" not in getattr(workspace, "__dict__", {})
+
+
+def test_study_service_facade_reexports_practice_domain() -> None:
+    """练习/错题/模拟卷域符号必须继续可从 study_service 导入且为同一对象。"""
+    facade_symbols = [
+        "_ai_review_wrong_answer",
+        "_answer_label",
+        "_append_practice_questions",
+        "_estimate_score",
+        "_find_any_question",
+        "_find_question",
+        "_grade_mock_written_answer",
+        "_is_written_mock_question",
+        "_knowledge_point_name",
+        "_normalize_generated_practice_questions",
+        "_prioritize_tasks",
+        "_record_written_wrong_answer",
+        "_record_wrong_answer",
+        "_update_mastery",
+        "clear_mock_result",
+        "clear_practice_answer",
+        "repair_course_mock_questions",
+        "submit_mock_answers",
+        "submit_practice_answer",
+        "submit_wrong_answer_retry",
+    ]
+    for name in facade_symbols:
+        assert hasattr(study_service, name), f"门面缺失符号: {name}"
+        assert getattr(study_service, name) is getattr(practice, name), (
+            f"{name} 不是 practice 本体的同一对象（re-export 被副本覆盖）"
+        )
+
+
+def test_practice_module_does_not_import_study_service() -> None:
+    """依赖方向约束：practice 模块级不依赖 study_service（环检查）。"""
+    assert "study_service" not in getattr(practice, "__dict__", {})
