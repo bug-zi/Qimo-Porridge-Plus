@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import material_parser, model_profiles, paths, study_service
+from app import material_parser, materials, model_profiles, paths, study_service
 
 
 def test_paths_module_is_sole_owner_of_directory_constants() -> None:
@@ -120,3 +120,39 @@ def test_study_service_facade_reexports_material_parser_domain() -> None:
 def test_material_parser_module_does_not_import_study_service() -> None:
     """依赖方向约束：material_parser 模块级不依赖 study_service（环检查）。"""
     assert "study_service" not in getattr(material_parser, "__dict__", {})
+
+
+def test_study_service_facade_reexports_materials_domain() -> None:
+    """资料管理域符号必须继续可从 study_service 导入且为同一对象。"""
+    facade_symbols = [
+        "MAX_SINGLE_MATERIAL_BYTES",
+        "MAX_BATCH_MATERIAL_BYTES",
+        "MATERIAL_ROLE_PRIMARY",
+        "MATERIAL_ROLE_SUPPLEMENTARY",
+        "MATERIAL_ROLE_VALUES",
+        "_apply_material_roles",
+        "_build_material_memory",
+        "_mark_material_memory",
+        "_material_digest",
+        "_material_role_metadata",
+        "_normalize_material_role",
+        "_safe_upload_material_name",
+        "_workspace_needs_material_refresh",
+        "delete_course_material",
+        "refresh_workspace_materials",
+        "scan_course_materials",
+        "sync_course_knowledge",
+        "update_course_material_role",
+        "upload_course_material",
+        "upload_course_materials",
+    ]
+    for name in facade_symbols:
+        assert hasattr(study_service, name), f"门面缺失符号: {name}"
+        assert getattr(study_service, name) is getattr(materials, name), (
+            f"{name} 不是 materials 本体的同一对象（re-export 被副本覆盖）"
+        )
+
+
+def test_materials_module_does_not_import_study_service() -> None:
+    """依赖方向约束：materials 模块级不依赖 study_service（环检查）。"""
+    assert "study_service" not in getattr(materials, "__dict__", {})
