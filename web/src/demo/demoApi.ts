@@ -299,30 +299,6 @@ function replaceWorkspace(courseId: string, workspace: StudyWorkspace): StudyWor
   return decoratedWorkspace(courseId)
 }
 
-function replaceFirstText(node: unknown, originalText: string, rewrittenText: string): boolean {
-  if (Array.isArray(node)) {
-    for (let index = 0; index < node.length; index += 1) {
-      const value = node[index]
-      if (typeof value === 'string' && value.includes(originalText)) {
-        node[index] = value.replace(originalText, rewrittenText)
-        return true
-      }
-      if (value && typeof value === 'object' && replaceFirstText(value, originalText, rewrittenText)) return true
-    }
-    return false
-  }
-  if (node && typeof node === 'object') {
-    for (const [key, value] of Object.entries(node)) {
-      if (typeof value === 'string' && value.includes(originalText)) {
-        ;(node as Record<string, unknown>)[key] = value.replace(originalText, rewrittenText)
-        return true
-      }
-      if (value && typeof value === 'object' && replaceFirstText(value, originalText, rewrittenText)) return true
-    }
-  }
-  return false
-}
-
 function recomputeCourseProgress(workspace: StudyWorkspace): number {
   if (!workspace.tasks.length) return workspace.course.progress
   return Math.round(workspace.tasks.reduce((sum, task) => sum + task.progress, 0) / workspace.tasks.length)
@@ -634,16 +610,25 @@ const demoApi: ApiSurface = {
 
   async approveStrategyDocumentsInBackground(courseId) {
     await loadSnapshot()
-    return { jobId: registerJob(courseId), courseId }
+    const jobId = registerJob(courseId)
+    return { jobId, courseId, job: await getJob(jobId) }
   },
 
   async getAgentJob(jobId) {
     return getJob(jobId)
   },
 
+  async getActiveStrategyGenerationJob(courseId) {
+    const active = [...jobs.values()].find((job) => job.courseId === courseId && ['queued', 'running'].includes(job.status))
+    return { job: active ? await getJob(active.id) : null }
+  },
+
   async cancelAgentJob(jobId) {
-    const job = getJob(jobId)
-    return { ...job, status: 'cancelled' as const, updatedAt: nowIso() }
+    const job = jobs.get(jobId)
+    if (!job) throw new Error('任务不存在')
+    job.status = 'cancelled'
+    job.updatedAt = nowIso()
+    return { ...job }
   },
 
   /* ---------------- 术语词条 ---------------- */
@@ -954,21 +939,45 @@ const demoApi: ApiSurface = {
     }
   },
 
-  async applyCourseFeedbackRewrite(courseId, feedbackId, originalText, rewrittenText, target) {
+  async applyCourseFeedbackRewrite(courseId, feedbackId, _rememberPreference = true) {
     await delay(250)
     await loadSnapshot()
-    const workspace = decoratedWorkspace(courseId)
-    const task = workspace.tasks.find((item) => item.id === target?.taskId)
-    if (!task?.studyGuide || !replaceFirstText(task.studyGuide, originalText, rewrittenText)) {
-      throw new Error('当前内容已经变化，找不到原始选中文本，请重新选择')
-    }
-    ;(task as PlanTask & { contentUpdatedAt?: string }).contentUpdatedAt = nowIso()
-    return { feedbackId, message: '演示模式：已确认替换。', workspace: replaceWorkspace(courseId, workspace) }
+    return { feedbackId, message: '演示模式：已按服务端最新建议确认替换。', workspace: replaceWorkspace(courseId, decoratedWorkspace(courseId)) }
+  },
+
+  async getCourseFeedbackItems(_courseId) {
+    await delay(80)
+    return { items: [] }
+  },
+
+  async getOpenCourseFeedback(_courseId) {
+    await delay(80)
+    return { items: [] }
+  },
+
+  async retryCourseFeedbackProposal(_courseId, feedbackId) {
+    await delay(180)
+    return { feedbackId, status: 'awaiting_confirmation', message: '演示模式：已重新生成修改建议。', rewriteProposal: { feedbackId, originalText: '演示原文', rewrittenText: '演示重试后的建议', rationale: '演示重试', replaceable: true, target: {}, createdAt: nowIso() } }
+  },
+
+  async abandonCourseFeedback(_courseId, feedbackId) {
+    await delay(80)
+    return { feedbackId, status: 'abandoned', message: '演示模式：已放弃修改建议。' }
   },
 
   async getCourseFeedbackRules(_courseId) {
     await delay(120)
     return { version: 1, rules: [], summaryPrompt: '', updatedAt: '' }
+  },
+
+  async mergeCourseFeedbackRules(_courseId, targetRuleId, sourceRuleIds) {
+    await delay(100)
+    return { targetRuleId, mergedRuleIds: sourceRuleIds, rules: { version: 1, rules: [], summaryPrompt: '', updatedAt: nowIso() } }
+  },
+
+  async updateCourseFeedbackRule(_courseId, _ruleId, _action) {
+    await delay(100)
+    return { message: '演示模式：偏好状态已更新。', rules: { version: 1, rules: [], summaryPrompt: '', updatedAt: nowIso() } }
   },
 
   async getEmbeddingProfile() {
@@ -1639,7 +1648,9 @@ function registerJob(courseId: string, jobType: AgentJob['jobType'] = 'strategy_
     jobType,
     status: 'queued',
     attempts: 1,
-    maxAttempts: 3,
+    maxAttempts: 1,
+    progress: { stage: 'preparing', stageAttempt: 1, message: '正在读取演示课程资料', updatedAt: nowIso() },
+    modelUsage: { calls: 0, failures: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, currentCall: null, recent: [] },
     error: '',
     result: {},
     createdAt: nowIso(),
@@ -1653,12 +1664,20 @@ async function getJob(jobId: string): Promise<AgentJob> {
   const job = jobs.get(jobId)
   if (!job) throw new Error('任务不存在')
   const elapsed = Date.now() - job.startedAtMs
-  if (job.status === 'completed') return { ...job }
+  if (job.status === 'completed' || job.status === 'cancelled') return { ...job }
   if (elapsed > 6000) {
     job.status = 'completed'
+    job.progress = { stage: 'finalizing', stageAttempt: 1, message: '演示课程已保存', updatedAt: nowIso() }
+    job.updatedAt = nowIso()
+  } else if (elapsed > 3500) {
+    job.status = 'running'
+    job.progress = { stage: 'lesson_questions', taskId: 'task-demo', stageAttempt: 1, message: '正在生成演示自测', updatedAt: nowIso() }
+    job.modelUsage = { calls: 1, failures: 0, promptTokens: 1200, completionTokens: 800, totalTokens: 2000, currentCall: { model: 'demo-model', startedAt: job.updatedAt, stage: 'lesson_questions', taskId: 'task-demo', attempt: 1 }, recent: [] }
     job.updatedAt = nowIso()
   } else if (elapsed > 1200) {
     job.status = 'running'
+    job.progress = { stage: 'lesson_guide', taskId: 'task-demo', stageAttempt: 1, message: '正在生成演示讲义', updatedAt: nowIso() }
+    job.modelUsage = { calls: 0, failures: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, currentCall: { model: 'demo-model', startedAt: job.updatedAt, stage: 'lesson_guide', taskId: 'task-demo', attempt: 1 }, recent: [] }
     job.updatedAt = nowIso()
   }
   return { ...job }

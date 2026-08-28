@@ -53,6 +53,7 @@ def run_content_workflow(
     use_existing_plan: bool = False,
     should_cancel: Callable[[], bool] | None = None,
     telemetry_job_id: str = "",
+    publish_job_progress: Callable[[str, str, int], None] | None = None,
 ) -> dict[str, Any]:
     run_id = create_agent_run(course_id, "content_generation", {"revision": workspace.get("revision", 0)})
     expected_days = int(workspace.get("onboarding", {}).get("days", 1))
@@ -111,10 +112,14 @@ def run_content_workflow(
             candidate = cached_plan_content["candidate"]
             planner_source = "checkpoint"
         else:
-            candidate = model_json(planner_prompt, json.dumps(planner_input, ensure_ascii=False), course_prompt)
+            if publish_job_progress:
+                publish_job_progress("content_planning", "", 1)
+            candidate = scoped_model_json("content_planning")(planner_prompt, json.dumps(planner_input, ensure_ascii=False), course_prompt)
             planning_issues = _plan_issues(candidate, expected_days, daily_minutes)
             if planning_issues:
-                candidate = model_json(
+                if publish_job_progress:
+                    publish_job_progress("content_planning", "", 2)
+                candidate = scoped_model_json("content_planning")(
                     planner_prompt + "\n请修复 planningIssues 中的全部问题，仍只返回完整规划 JSON。",
                     json.dumps({**planner_input, "planningIssues": planning_issues}, ensure_ascii=False),
                     course_prompt,
@@ -204,6 +209,8 @@ def run_content_workflow(
             ordered_lessons=ordered_lessons,
             lesson_index_by_id=lesson_index_by_id,
             check_cancelled=check_cancelled,
+            publish_progress=publish_job_progress,
+            scoped_model_json=scoped_model_json,
             deps=LessonRuntimeDeps(
                 get_latest_artifact=get_latest_artifact,
                 save_artifact=save_artifact,
@@ -237,7 +244,9 @@ def run_content_workflow(
                         return cached_questions
             query = " ".join(str(point.get("name", "")) for point in candidate.get("knowledgePoints", []) if isinstance(point, dict))
             retrieval = retrieve_material_context(course_id, f"{query} 模拟卷 样卷 试卷 真题 考试题型 分值比例 综合题 计算题", limit=12)
-            result = model_json(
+            if publish_job_progress:
+                publish_job_progress("mock_exam", "", 1)
+            result = scoped_model_json("mock_exam")(
                 mock_prompt,
                 json.dumps(
                     {
@@ -262,7 +271,9 @@ def run_content_workflow(
                 )
             )
             if issues:
-                result = model_json(
+                if publish_job_progress:
+                    publish_job_progress("mock_exam", "", 2)
+                result = scoped_model_json("mock_exam")(
                     mock_prompt + "\n请修复 questionIssues 中的全部问题。",
                     json.dumps(
                         {

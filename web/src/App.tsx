@@ -31,6 +31,7 @@ import {
 } from 'lucide-react'
 import {
   adjustCoursePlan,
+  abandonCourseFeedback,
   applyCourseFeedbackRewrite,
   applyGlobalCourseFeedback,
   applyCourseAdjustmentProposal,
@@ -39,7 +40,6 @@ import {
   streamStrategyRevision,
   type AgentStreamHandle,
   approveStrategyDocumentsInBackground,
-  cancelAgentJob,
   clearCourseMockResult,
   clearCoursePracticeAnswer,
   createCourse,
@@ -50,9 +50,9 @@ import {
   deleteCourseWrongAnswer,
   dismissCourseAdjustmentProposal,
   generateStrategyDocuments,
-  getAgentJob,
   getCourseWorkspace,
   getAccountProfile,
+  getOpenCourseFeedback,
   getStrategyDocuments,
   getRuntimeModel,
   listArchiveItems,
@@ -67,6 +67,7 @@ import {
   saveCoursePrompt,
   saveCourseSetup,
   refineCourseFeedbackRewrite,
+  retryCourseFeedbackProposal,
   submitCourseFeedback,
   submitGlobalCourseFeedback,
   refineGlobalCourseFeedback,
@@ -93,11 +94,11 @@ import { AUTH_EXPIRED_EVENT, getStoredUser, hasSession, logout, updateStoredUser
 import { LoginPage } from './components/LoginPage'
 import { isDemoMode } from './apiClient'
 import { useSpecularButtons } from './hooks/useSpecularButtons'
+import { useStrategyGenerationJob } from './hooks/useStrategyGenerationJob'
 import { buildCourseTimeline, summarizeTimeline, COURSE_CATEGORY_TABS, type CourseTimelineCategory } from './utils/courseTimeline'
 import { restoreNoteHighlights, removeNoteHighlight, discardCourseNoteHighlights, type NoteHighlightHit } from './utils/noteHighlights'
 import type {
   AdjustmentProposal,
-  AgentJob,
   ArchiveItem,
   Course,
   LearningModule,
@@ -114,6 +115,7 @@ import type {
   UiFont,
   UiFontSize,
   WrongAnswer,
+  CourseFeedbackOpenSession,
 } from './types'
 import { createFallbackTasks } from './data/demoData'
 import './App.css'
@@ -134,13 +136,6 @@ type NewCourseForm = {
   examDate: string
   targetScore: string
   dailyHours: string
-}
-
-type StrategyGenerationJobState = {
-  courseId: string
-  job: AgentJob
-  startedAtMs: number
-  elapsedSeconds: number
 }
 
 const initialNewCourseForm: NewCourseForm = {
@@ -571,7 +566,6 @@ function App() {
   const [hasSearched, setHasSearched] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [diagnosticReviewAnswers, setDiagnosticReviewAnswers] = useState<Record<string, number> | null>(null)
-  const [strategyGenerationJob, setStrategyGenerationJob] = useState<StrategyGenerationJobState | null>(null)
   const courseMenuRef = useRef<HTMLDivElement | null>(null)
   const noteSaveTimer = useRef<number | undefined>(undefined)
   // 最近一次尚停留在防抖定时器里、未真正发出的笔记；供 beforeunload 兜底 flush。
@@ -591,63 +585,6 @@ function App() {
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
   }, [pendingCourseDelete, pendingWrongAnswerDelete, isArchivingCourse, isArchivingWrongAnswer])
-
-  useEffect(() => {
-    if (!strategyGenerationJob || !['queued', 'running'].includes(strategyGenerationJob.job.status)) return
-    const timer = window.setInterval(() => {
-      setStrategyGenerationJob((current) => current
-        ? { ...current, elapsedSeconds: Math.floor((Date.now() - current.startedAtMs) / 1000) }
-        : current)
-    }, 1000)
-    return () => window.clearInterval(timer)
-  }, [strategyGenerationJob?.job.id, strategyGenerationJob?.job.status])
-
-  useEffect(() => {
-    if (!strategyGenerationJob || !['queued', 'running'].includes(strategyGenerationJob.job.status)) return
-    let isCancelled = false
-    async function pollGenerationJob() {
-      if (!strategyGenerationJob) return
-      try {
-        const job = await getAgentJob(strategyGenerationJob.job.id)
-        if (isCancelled) return
-        setStrategyGenerationJob((current) => current ? { ...current, job } : current)
-        if (job.status === 'running') {
-          const previewWorkspace = await getCourseWorkspace(strategyGenerationJob.courseId)
-          if (isCancelled) return
-          setCourseWorkspaces((current) => ({ ...current, [previewWorkspace.course.id]: previewWorkspace }))
-          setCourses((current) => mergeCourseList([previewWorkspace.course], current))
-        }
-        if (job.status === 'completed') {
-          const refreshedWorkspace = await getCourseWorkspace(strategyGenerationJob.courseId)
-          if (isCancelled) return
-          setCourseWorkspaces((current) => ({ ...current, [refreshedWorkspace.course.id]: refreshedWorkspace }))
-          setCourses((current) => mergeCourseList([refreshedWorkspace.course], current))
-          setActiveCourseId(refreshedWorkspace.course.id)
-          setActiveModule((current) => current === 'mock' ? 'mock' : 'plan')
-          window.setTimeout(() => {
-            setStrategyGenerationJob((current) => current?.job.id === job.id ? null : current)
-          }, 8000)
-        } else if (job.status === 'failed') {
-          const failedWorkspace = await getCourseWorkspace(strategyGenerationJob.courseId)
-          if (isCancelled) return
-          setCourseWorkspaces((current) => ({ ...current, [failedWorkspace.course.id]: failedWorkspace }))
-          setCourses((current) => mergeCourseList([failedWorkspace.course], current))
-          setActiveModule('materials')
-        }
-      } catch (error) {
-        if (isCancelled) return
-        setStrategyGenerationJob((current) => current
-          ? { ...current, job: { ...current.job, status: 'failed', error: error instanceof Error ? error.message : '后台任务状态读取失败' } }
-          : current)
-      }
-    }
-    void pollGenerationJob()
-    const timer = window.setInterval(() => void pollGenerationJob(), 1800)
-    return () => {
-      isCancelled = true
-      window.clearInterval(timer)
-    }
-  }, [strategyGenerationJob?.job.id, strategyGenerationJob?.job.status])
 
   useEffect(() => {
     document.documentElement.dataset.appFont = uiFont
@@ -822,6 +759,35 @@ function App() {
     if (activeCourse.id === workspace.course.id) return workspace
     return courseWorkspaces[activeCourse.id] ?? createLocalCourseWorkspace(activeCourse)
   }, [activeCourse, courseWorkspaces, workspace])
+
+  const refreshGenerationWorkspace = useCallback(async (courseId: string) => {
+    const refreshed = await getCourseWorkspace(courseId)
+    const mergeGeneratedFields = (current: StudyWorkspace) => ({
+      ...current,
+      course: refreshed.course,
+      tasks: refreshed.tasks,
+      knowledgePoints: refreshed.knowledgePoints,
+      practiceQuestions: refreshed.practiceQuestions,
+      mockQuestions: refreshed.mockQuestions,
+      onboarding: refreshed.onboarding,
+      strategyDocuments: refreshed.strategyDocuments,
+      readabilityReview: refreshed.readabilityReview,
+      assessmentProfile: refreshed.assessmentProfile,
+      diagnostic: refreshed.diagnostic,
+    })
+    setWorkspace((current) => current?.course.id === courseId ? mergeGeneratedFields(current) : current)
+    setCourseWorkspaces((current) => {
+      const existing = current[courseId]
+      return { ...current, [courseId]: existing ? mergeGeneratedFields(existing) : refreshed }
+    })
+    setCourses((current) => mergeCourseList([refreshed.course], current))
+  }, [])
+  const {
+    session: strategyGenerationJob,
+    submitJob: trackStrategyGenerationJob,
+    refresh: refreshStrategyGenerationStatus,
+    requestStop: requestStrategyGenerationStop,
+  } = useStrategyGenerationJob(activeCourseId || null, refreshGenerationWorkspace)
 
   // 切换课程/模块后按 localStorage 里的文本锚点重建摘录高光：旧 Range 指向的
   // 节点已卸载，锚点会在新 DOM 里重新定位；异步内容（AI 历史等）尚未渲染的
@@ -1142,15 +1108,31 @@ function App() {
     return refineCourseFeedbackRewrite(activeWorkspace.course.id, feedbackId, extraComment, previousRewrite)
   }
 
-  async function handleApplyCourseFeedbackRewrite(feedbackId: string, originalText: string, rewrittenText: string, target: CourseFeedbackDraft['context']) {
+  async function handleApplyCourseFeedbackRewrite(feedbackId: string, rememberPreference: boolean) {
     if (!activeWorkspace) throw new Error('当前课程尚未加载。')
-    const result = await applyCourseFeedbackRewrite(activeWorkspace.course.id, feedbackId, originalText, rewrittenText, target)
+    const result = await applyCourseFeedbackRewrite(activeWorkspace.course.id, feedbackId, rememberPreference, activeWorkspace.revision)
     // apply 接口返回的 workspace 就是本次替换落盘后的权威结果。这里不能再额外 GET：
     // 若此时恰好有学习进度保存/内容刷新并发，二次读取可能拿到旧快照，导致界面提示
     // “替换成功”却又被旧文本覆盖。直接提交接口结果可保证确认的改写立即显示。
     updateActiveWorkspace(() => result.workspace)
     return result.message
   }
+
+  async function handleRetryCourseFeedback(feedbackId: string) {
+    if (!activeWorkspace) throw new Error('当前课程尚未加载。')
+    return retryCourseFeedbackProposal(activeWorkspace.course.id, feedbackId)
+  }
+
+  async function handleAbandonCourseFeedback(feedbackId: string) {
+    if (!activeWorkspace) throw new Error('当前课程尚未加载。')
+    return abandonCourseFeedback(activeWorkspace.course.id, feedbackId)
+  }
+
+  const handleLoadOpenCourseFeedback = useCallback(async (): Promise<CourseFeedbackOpenSession | null> => {
+    if (!activeWorkspace) return null
+    const result = await getOpenCourseFeedback(activeWorkspace.course.id)
+    return result.items.find((entry) => entry.rewriteProposal) ?? null
+  }, [activeWorkspace?.course.id])
 
   /**
    * 点击高光取消时执行：先摘掉高光，再从笔记里删除对应引用块。
@@ -1570,24 +1552,7 @@ function App() {
   async function handleApproveStrategyDocuments(payload: StrategyGenerationRequest) {
     if (!activeWorkspace) throw new Error('当前课程尚未加载。')
     const queued = await approveStrategyDocumentsInBackground(activeWorkspace.course.id, payload)
-    const now = Date.now()
-    setStrategyGenerationJob({
-      courseId: queued.courseId,
-      startedAtMs: now,
-      elapsedSeconds: 0,
-      job: {
-        id: queued.jobId,
-        courseId: queued.courseId,
-        jobType: 'approve_strategy_documents',
-        status: 'queued',
-        attempts: 0,
-        maxAttempts: 2,
-        error: '',
-        result: {},
-        createdAt: new Date(now).toISOString(),
-        updatedAt: new Date(now).toISOString(),
-      },
-    })
+    trackStrategyGenerationJob(queued.courseId, queued.job)
     setActiveModule('plan')
   }
 
@@ -1625,13 +1590,7 @@ function App() {
   }
 
   async function handleCancelStrategyGeneration() {
-    if (!strategyGenerationJob || !['queued', 'running'].includes(strategyGenerationJob.job.status)) return
-    const cancelled = await cancelAgentJob(strategyGenerationJob.job.id)
-    setStrategyGenerationJob((current) => current ? { ...current, job: cancelled } : current)
-    if (activeWorkspace) {
-      const refreshed = await getCourseWorkspace(activeWorkspace.course.id)
-      updateActiveWorkspace(() => refreshed)
-    }
+    await requestStrategyGenerationStop()
   }
 
   async function handleRepairMockGeneration() {
@@ -2107,6 +2066,7 @@ function App() {
           onGenerateStrategyDocuments={handleGenerateStrategyDocuments}
           onApproveStrategyDocuments={handleApproveStrategyDocuments}
           onRefreshWorkspace={handleRefreshWorkspace}
+          onRefreshStrategyGeneration={refreshStrategyGenerationStatus}
           onReviewCourseReadability={handleReviewCourseReadability}
           onRepairStrategyGeneration={handleRepairStrategyGeneration}
           onCancelStrategyGeneration={handleCancelStrategyGeneration}
@@ -2244,6 +2204,9 @@ function App() {
         onSubmitCourseFeedback={handleSubmitCourseFeedback}
         onRefineCourseFeedback={handleRefineCourseFeedback}
         onApplyCourseFeedbackRewrite={handleApplyCourseFeedbackRewrite}
+        onRetryCourseFeedback={handleRetryCourseFeedback}
+        onAbandonCourseFeedback={handleAbandonCourseFeedback}
+        onLoadOpenCourseFeedback={handleLoadOpenCourseFeedback}
       />
       <NoteHighlightDismiss onRemove={removeNoteSnippet} />
     </div>

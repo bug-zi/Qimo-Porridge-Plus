@@ -4,10 +4,10 @@ import app.course_feedback_service as feedback
 from app.agents.workflow import _strong_feedback_issues
 
 
-def test_rules_prompt_recovers_legacy_section_feedback_as_must(monkeypatch) -> None:
+def test_rules_prompt_recovers_accepted_legacy_section_feedback_as_must(monkeypatch) -> None:
     monkeypatch.setattr(feedback, "_read_rules_store", lambda _course_id: {"rules": [], "strongDirectives": [], "summaryPrompt": ""})
     monkeypatch.setattr(feedback, "_read_feedback_entries", lambda _course_id: [{
-        "id": "old-feedback", "createdAt": "2026-01-01T00:00:00",
+        "id": "old-feedback", "createdAt": "2026-01-01T00:00:00", "status": "accepted",
         "userComment": "只需要有背景引导+本节课关键词的解释+01结尾与02-讲解开头衔接",
         "context": {"feedbackScope": "section", "sectionId": "preparation", "sectionLabel": "课前准备"},
     }])

@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import main, study_service
 from app.agents import workflow
+from app.routers import strategy as strategy_router
 from app.routers.strategy import StrategyDocumentsUpdateRequest
 
 
@@ -219,6 +220,24 @@ def test_generation_request_validates_incremental_fields():
     assert request.generation_mode == "incremental"
     assert request.lesson_limit == 1
     assert request.continue_generation is True
+
+
+def test_generation_enqueue_returns_authoritative_job(monkeypatch):
+    monkeypatch.setattr(strategy_router, "enqueue_agent_job", lambda *args, **kwargs: "job-1")
+    monkeypatch.setattr(strategy_router, "get_agent_job", lambda job_id: {
+        "id": job_id, "courseId": "course-1", "status": "queued",
+        "attempts": 0, "maxAttempts": 1, "progress": {},
+    })
+    payload = StrategyDocumentsUpdateRequest(
+        review_plan="plan", course_prompt="prompt", review_plan_version=1, course_prompt_version=1,
+        generation_mode="incremental", lesson_limit=1, continue_generation=True,
+    )
+
+    response = strategy_router.enqueue_course_strategy_approval("course-1", payload)
+
+    assert response["jobId"] == "job-1"
+    assert response["courseId"] == "course-1"
+    assert response["job"]["maxAttempts"] == 1
 
 
 def test_repair_does_not_rewrite_strategy_documents_or_increment_versions(monkeypatch):

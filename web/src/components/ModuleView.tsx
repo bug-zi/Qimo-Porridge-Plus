@@ -44,7 +44,6 @@ import {
   Send,
   SlidersHorizontal,
   Sparkles,
-  Square,
   Target,
   TimerReset,
   Trash2,
@@ -56,7 +55,6 @@ import { formatReviewDays, reviewSessionDays } from '../utils/reviewSchedule'
 import { authFetch, type AuthUser } from '../auth'
 import type {
   AdjustmentProposal,
-  AgentJob,
   ArchiveItem,
   BilibiliCredentialStatus,
   Course,
@@ -84,6 +82,7 @@ import type {
   StudyWorkspace,
   StrategyDocuments,
   StrategyGenerationRequest,
+  StrategyGenerationSession,
   StrategyRevisionMessage,
   TimeLogEntry,
   UiFont,
@@ -99,13 +98,12 @@ import {
   getCourseMaterialConvertedFileUrl,
   getCourseMaterialFileUrl,
   getCourseMaterialPreview,
-  getModelUsage,
   listMcpServers,
   submitCourseExternalSource,
 } from '../apiClient'
-import type { ModelUsageSnapshot } from '../api'
 import { SettingsView } from './SettingsView'
 import { PlanningView } from './PlanningView'
+import { CourseGenerationStatusCard } from './CourseGenerationStatusCard'
 
 const CourseMindMapView = lazy(() => import('./CourseMindMapView').then((module) => ({ default: module.CourseMindMapView })))
 
@@ -139,11 +137,7 @@ type ModuleViewProps = {
   onboarding?: CourseOnboarding
   strategyDocuments?: StrategyDocuments
   readabilityReview?: CourseReadabilityReview
-  strategyGenerationJob?: {
-    courseId: string
-    job: AgentJob
-    elapsedSeconds: number
-  } | null
+  strategyGenerationJob?: StrategyGenerationSession | null
   diagnosticQuestions?: QuizQuestion[]
   onTasksChange: (tasks: PlanTask[]) => void
   onWrongAnswersChange: (wrongAnswers: WrongAnswer[]) => void
@@ -183,6 +177,7 @@ type ModuleViewProps = {
   onGenerateStrategyDocuments: () => Promise<void>
   onApproveStrategyDocuments: (payload: StrategyGenerationRequest) => Promise<void>
   onRefreshWorkspace: () => Promise<void>
+  onRefreshStrategyGeneration: () => Promise<void>
   onReviewCourseReadability: () => Promise<void>
   onRepairStrategyGeneration: (lessonLimit?: number | null) => Promise<void>
   onCancelStrategyGeneration: () => Promise<void>
@@ -1008,6 +1003,7 @@ function PlanView({
   readabilityReview,
   onModuleChange,
   onRefreshWorkspace,
+  onRefreshStrategyGeneration,
   onReviewCourseReadability,
   onRepairStrategyGeneration,
   onCancelStrategyGeneration,
@@ -1028,6 +1024,7 @@ function PlanView({
   | 'readabilityReview'
   | 'onModuleChange'
   | 'onRefreshWorkspace'
+  | 'onRefreshStrategyGeneration'
   | 'onReviewCourseReadability'
   | 'onRepairStrategyGeneration'
   | 'onCancelStrategyGeneration'
@@ -1043,41 +1040,9 @@ function PlanView({
   const [isRefreshingGeneration, setIsRefreshingGeneration] = useState(false)
   const [isReviewingReadability, setIsReviewingReadability] = useState(false)
   const [isRepairingGeneration, setIsRepairingGeneration] = useState(false)
-  const [isCancellingGeneration, setIsCancellingGeneration] = useState(false)
   const [generationActionError, setGenerationActionError] = useState('')
   const activeGenerationJob = strategyGenerationJob?.courseId === course.id ? strategyGenerationJob : null
   const isGeneratingPlan = activeGenerationJob && ['queued', 'running'].includes(activeGenerationJob.job.status)
-  const [modelUsage, setModelUsage] = useState<ModelUsageSnapshot | null>(null)
-
-  const [usageNowTick, setUsageNowTick] = useState(0)
-
-  useEffect(() => {
-    if (!isGeneratingPlan) return
-    let isCancelled = false
-    const loadUsage = () => {
-      void getModelUsage()
-        .then((usage) => {
-          if (!isCancelled) setModelUsage(usage)
-        })
-        .catch(() => {
-          // 用量读取失败不影响生成进度展示
-        })
-    }
-    loadUsage()
-    const timer = window.setInterval(loadUsage, 10000)
-    return () => {
-      isCancelled = true
-      window.clearInterval(timer)
-    }
-  }, [isGeneratingPlan])
-
-  useEffect(() => {
-    if (!isGeneratingPlan) return
-    const timer = window.setInterval(() => setUsageNowTick((current) => current + 1), 1000)
-    return () => {
-      window.clearInterval(timer)
-    }
-  }, [isGeneratingPlan])
   const lessonTasks = tasks.filter((task) => task.kind !== 'orientation')
   const pendingContentCount = lessonTasks.filter((task) => !task.studyGuide).length
   const completedContentCount = lessonTasks.filter((task) => task.studyGuide).length
@@ -1100,7 +1065,7 @@ function PlanView({
     setIsRefreshingGeneration(true)
     setGenerationActionError('')
     try {
-      await onRefreshWorkspace()
+      await onRefreshStrategyGeneration()
     } catch (refreshError) {
       setGenerationActionError(refreshError instanceof Error ? refreshError.message : '刷新生成状态失败')
     } finally {
@@ -1121,14 +1086,11 @@ function PlanView({
   }
 
   async function cancelGeneration() {
-    setIsCancellingGeneration(true)
     setGenerationActionError('')
     try {
       await onCancelStrategyGeneration()
     } catch (cancelError) {
       setGenerationActionError(cancelError instanceof Error ? cancelError.message : '结束生成失败')
-    } finally {
-      setIsCancellingGeneration(false)
     }
   }
 
@@ -1179,73 +1141,30 @@ function PlanView({
         </section>
       )}
 
-      {(activeGenerationJob || pendingContentCount > 0) && (
-        <section className={`plan-generation-status is-${activeGenerationJob?.job.status ?? 'partial'}`}>
-          <div className="plan-generation-status-icon">
-            {isGeneratingPlan || !activeGenerationJob ? <RefreshCw className={isGeneratingPlan ? 'is-spinning' : ''} size={20} /> : <CheckCircle2 size={20} />}
-          </div>
-          <div>
-            <strong>
-              {activeGenerationJob?.job.status === 'failed'
-                ? '复习主线后台生成失败'
-                : activeGenerationJob?.job.status === 'cancelled'
-                  ? '课程内容生成已结束'
-                : activeGenerationJob?.job.status === 'completed'
-                  ? pendingContentCount > 0 ? `本批已完成，仍有 ${pendingContentCount} 课待生成` : '复习主线已全部生成完成'
-                  : activeGenerationJob
-                    ? '复习主线正在后台生成'
-                    : '课程内容等待继续生成'}
-            </strong>
-            <p>
-              {activeGenerationJob
-                ? activeGenerationJob.job.status === 'completed'
-                  ? `本批结束 · 已完成 ${completedContentCount}/${completedContentCount + pendingContentCount} 节 · ${pendingContentCount > 0 ? `仍有 ${pendingContentCount} 课待生成` : '全部课程已完成'}`
-                  : `已运行 ${activeGenerationJob.elapsedSeconds} 秒 · 已完成 ${completedContentCount}/${completedContentCount + pendingContentCount} 节`
-                : `已完成 ${completedContentCount} 课，待生成 ${pendingContentCount} 课`}
-              {activeGenerationJob?.job.status === 'running' ? ` · 第 ${activeGenerationJob.job.attempts} 次执行` : ''}
-              {activeGenerationJob?.job.status === 'queued' ? ' · 等待后台 worker 接手' : ''}
-              {modelUsage && modelUsage.calls + modelUsage.failures > 0
-                ? ` · 已调用 ${modelUsage.calls} 次${modelUsage.failures ? `（失败 ${modelUsage.failures}）` : ''} · tokens ${modelUsage.totalTokens.toLocaleString()}（入 ${modelUsage.promptTokens.toLocaleString()} / 出 ${modelUsage.completionTokens.toLocaleString()}）`
-                : ''}
-              {modelUsage?.currentCall?.startedAt && isGeneratingPlan
-                ? (() => {
-                    void usageNowTick
-                    const elapsedSeconds = Math.max(0, Math.floor((Date.now() - new Date(modelUsage.currentCall.startedAt).getTime()) / 1000))
-                    const firstCallHint = modelUsage && modelUsage.calls + modelUsage.failures === 0 && elapsedSeconds < 480 ? '，首节生成约需 5-8 分钟' : ''
-                    return ` · 模型调用进行中（${modelUsage.currentCall.model || '模型'}，已 ${elapsedSeconds}s${firstCallHint}）`
-                  })()
-                : isGeneratingPlan
-                  ? ' · 正在等待模型响应'
-                  : ''}
-            </p>
-            {modelUsage && isGeneratingPlan && modelUsage.recent.length > 0 && (
-              <p className="plan-generation-usage-recent">
-                最近调用：{modelUsage.recent[modelUsage.recent.length - 1].model} · +{modelUsage.recent[modelUsage.recent.length - 1].totalTokens.toLocaleString()} tokens · {modelUsage.recent[modelUsage.recent.length - 1].at.slice(11, 19)}
-              </p>
-            )}
-            {activeGenerationJob?.job.error && <p role="alert">{activeGenerationJob.job.error}</p>}
-            {generationActionError && <p role="alert">{generationActionError}</p>}
-          </div>
+      {activeGenerationJob && (
+        <CourseGenerationStatusCard
+          session={activeGenerationJob}
+          tasks={tasks}
+          completedCount={completedContentCount}
+          totalCount={completedContentCount + pendingContentCount}
+          isRefreshing={isRefreshingGeneration}
+          actionError={generationActionError}
+          onRefresh={() => void refreshGenerationStatus()}
+          onStop={() => void cancelGeneration()}
+        />
+      )}
+      {!isGeneratingPlan && pendingContentCount > 0 && (
+        <section className="plan-generation-status is-partial">
+          <div><strong>课程内容等待继续生成</strong><p>已完成 {completedContentCount} 课，待生成 {pendingContentCount} 课。</p></div>
           <div className="plan-generation-actions">
-            <button className="secondary-button" type="button" disabled={isRefreshingGeneration} onClick={refreshGenerationStatus}>
-              <RefreshCw className={isRefreshingGeneration ? 'is-spinning' : ''} size={16} /> {isRefreshingGeneration ? '刷新中' : '刷新状态'}
+            <div className="lesson-batch-selector" role="group" aria-label="每批生成课程数">
+              <button type="button" className={lessonBatch === 1 ? 'is-active' : ''} onClick={() => setLessonBatch(1)}>1 课</button>
+              <button type="button" className={lessonBatch === 3 ? 'is-active' : ''} onClick={() => setLessonBatch(3)}>3 课</button>
+              <button type="button" className={lessonBatch === 'all' ? 'is-active' : ''} onClick={() => setLessonBatch('all')}>剩余全部</button>
+            </div>
+            <button className="primary-button" type="button" disabled={isRepairingGeneration} onClick={repairGeneration}>
+              <Play size={16} /> {isRepairingGeneration ? '正在入队' : lessonBatch === 'all' ? '生成剩余全部' : lessonBatch === 3 ? '生成下 3 课' : '生成下一课'}
             </button>
-            {isGeneratingPlan ? (
-              <button className="primary-button" type="button" disabled={isCancellingGeneration} onClick={cancelGeneration}>
-                <Square size={16} /> {isCancellingGeneration ? '正在结束' : '结束生成'}
-              </button>
-            ) : pendingContentCount > 0 && (
-              <>
-                <div className="lesson-batch-selector" role="group" aria-label="每批生成课程数">
-                  <button type="button" className={lessonBatch === 1 ? 'is-active' : ''} onClick={() => setLessonBatch(1)}>1 课</button>
-                  <button type="button" className={lessonBatch === 3 ? 'is-active' : ''} onClick={() => setLessonBatch(3)}>3 课</button>
-                  <button type="button" className={lessonBatch === 'all' ? 'is-active' : ''} onClick={() => setLessonBatch('all')}>剩余全部</button>
-                </div>
-                <button className="primary-button" type="button" disabled={isRepairingGeneration} onClick={repairGeneration}>
-                  <Play size={16} /> {isRepairingGeneration ? '正在入队' : lessonBatch === 'all' ? '生成剩余全部' : lessonBatch === 3 ? '生成下 3 课' : '生成下一课'}
-                </button>
-              </>
-            )}
           </div>
         </section>
       )}
@@ -1962,7 +1881,7 @@ function StrategyReviewView({
       {documentsReady && <footer className="strategy-review-actions">
         <span>
           {isGeneratingPlan
-            ? `后台生成中，已运行 ${activeGenerationJob?.elapsedSeconds ?? 0} 秒；你可以切换到其他页面。`
+            ? `后台生成中，已运行 ${Math.max(0, Math.floor((Date.now() - Date.parse(activeGenerationJob?.job.createdAt ?? new Date().toISOString())) / 1000))} 秒；你可以切换到其他页面。`
             : '提交后，复习计划由 AI 按关键学习事件维护；课程总 Prompt 仍由你维护。'}
         </span>
         <button className="primary-button" type="button" disabled={isSubmitting || isGeneratingPlan} onClick={approveDocuments}>

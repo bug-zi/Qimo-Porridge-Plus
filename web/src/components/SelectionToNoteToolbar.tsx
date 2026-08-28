@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useReducer, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Check, MessageSquareText, NotebookPen, X } from 'lucide-react'
+import { Check, MessageSquareText, NotebookPen, RotateCcw, X } from 'lucide-react'
 import { useTextSelection } from '../hooks/useTextSelection'
 import { highlightSnippetSelection } from '../utils/noteHighlights'
-import type { CourseFeedbackContext, CourseFeedbackRefineResult, CourseFeedbackSelectionFragment, CourseFeedbackSubmitResult } from '../types'
+import type { CourseFeedbackActionResult, CourseFeedbackContext, CourseFeedbackOpenSession, CourseFeedbackRefineResult, CourseFeedbackSelectionFragment, CourseFeedbackSubmitResult } from '../types'
+import { CourseFeedbackPreview } from './CourseFeedbackPreview'
+import { feedbackDialogReducer, initialFeedbackDialogState, isFeedbackBusy } from './courseFeedbackState'
 
 export type CourseFeedbackDraft = {
   selectedText: string
@@ -15,7 +17,10 @@ interface SelectionToNoteToolbarProps {
   onAddToNote: (text: string) => void
   onSubmitCourseFeedback?: (draft: CourseFeedbackDraft) => Promise<CourseFeedbackSubmitResult>
   onRefineCourseFeedback?: (feedbackId: string, extraComment: string, previousRewrite: string) => Promise<CourseFeedbackRefineResult>
-  onApplyCourseFeedbackRewrite?: (feedbackId: string, originalText: string, rewrittenText: string, target: CourseFeedbackContext) => Promise<string | void>
+  onApplyCourseFeedbackRewrite?: (feedbackId: string, rememberPreference: boolean) => Promise<string | void>
+  onRetryCourseFeedback?: (feedbackId: string) => Promise<CourseFeedbackActionResult>
+  onAbandonCourseFeedback?: (feedbackId: string) => Promise<CourseFeedbackActionResult>
+  onLoadOpenCourseFeedback?: () => Promise<CourseFeedbackOpenSession | null>
 }
 
 const TOOLBAR_HEIGHT = 38
@@ -132,263 +137,79 @@ function feedbackContextFromSelection(selectedText: string): CourseFeedbackConte
   }
 }
 
-export function SelectionToNoteToolbar({
-  onAddToNote,
-  onSubmitCourseFeedback,
-  onRefineCourseFeedback,
-  onApplyCourseFeedbackRewrite,
-}: SelectionToNoteToolbarProps) {
+
+export function SelectionToNoteToolbar({ onAddToNote, onSubmitCourseFeedback, onRefineCourseFeedback, onApplyCourseFeedbackRewrite, onRetryCourseFeedback, onAbandonCourseFeedback, onLoadOpenCourseFeedback }: SelectionToNoteToolbarProps) {
   const snapshot = useTextSelection()
   const [flash, setFlash] = useState(false)
   const [feedbackDraft, setFeedbackDraft] = useState<{ selectedText: string; context: CourseFeedbackContext } | null>(null)
   const [feedbackText, setFeedbackText] = useState('')
-  const [feedbackStatus, setFeedbackStatus] = useState<'idle' | 'submitting' | 'preview' | 'refining' | 'applying' | 'success' | 'error'>('idle')
-  const [feedbackMessage, setFeedbackMessage] = useState('')
-  const [feedbackId, setFeedbackId] = useState('')
-  const [proposal, setProposal] = useState<CourseFeedbackSubmitResult['rewriteProposal'] | null>(null)
+  const [state, dispatch] = useReducer(feedbackDialogReducer, initialFeedbackDialogState)
   const [refineText, setRefineText] = useState('')
   const [showRefineInput, setShowRefineInput] = useState(false)
   const flashTimer = useRef<number | undefined>(undefined)
+  const successTimer = useRef<number | undefined>(undefined)
 
-  useEffect(() => () => window.clearTimeout(flashTimer.current), [])
-
-  const resetFeedback = () => {
+  useEffect(() => () => { window.clearTimeout(flashTimer.current); window.clearTimeout(successTimer.current) }, [])
+  useEffect(() => {
+    let cancelled = false
     setFeedbackDraft(null)
-    setFeedbackText('')
-    setFeedbackStatus('idle')
-    setFeedbackMessage('')
-    setFeedbackId('')
-    setProposal(null)
-    setRefineText('')
-    setShowRefineInput(false)
-  }
+    dispatch({ type: 'reset' })
+    if (!onLoadOpenCourseFeedback) return () => { cancelled = true }
+    void onLoadOpenCourseFeedback().then((session) => {
+      if (cancelled || !session?.rewriteProposal) return
+      setFeedbackDraft({ selectedText: session.selectedText || session.rewriteProposal.originalText, context: session.context ?? session.rewriteProposal.target })
+      dispatch({ type: 'proposal', feedbackId: session.feedbackId, proposal: session.rewriteProposal, message: '已恢复当前课程上次未确认的修改建议。' })
+    }).catch(() => undefined)
+    return () => { cancelled = true }
+  }, [onLoadOpenCourseFeedback])
 
-  const handleAdd = () => {
-    if (!snapshot) return
-    // 先登记高光锚点，再更新笔记面板。否则 React 追加引用块后，
-    // 整页文本流会改变，持久化锚点可能指到笔记里的引用文本。
-    highlightSnippetSelection(window.getSelection(), snapshot.text)
-    onAddToNote(snapshot.text)
-    setFlash(true)
-    window.clearTimeout(flashTimer.current)
-    flashTimer.current = window.setTimeout(() => {
-      window.getSelection()?.removeAllRanges()
-      setFlash(false)
-    }, FLASH_DURATION)
-  }
-
-  const openFeedback = () => {
-    if (!snapshot) return
-    setFeedbackDraft({ selectedText: snapshot.text, context: feedbackContextFromSelection(snapshot.text) })
-    setFeedbackText('')
-    setFeedbackStatus('idle')
-    setFeedbackMessage('')
-    setFeedbackId('')
-    setProposal(null)
-    setRefineText('')
-    setShowRefineInput(false)
-  }
-
-  const closeFeedback = () => {
-    if (feedbackStatus === 'submitting' || feedbackStatus === 'refining' || feedbackStatus === 'applying') return
-    resetFeedback()
-  }
+  const resetFeedback = () => { setFeedbackDraft(null); setFeedbackText(''); dispatch({ type: 'reset' }); setRefineText(''); setShowRefineInput(false) }
+  const handleAdd = () => { if (!snapshot) return; highlightSnippetSelection(window.getSelection(), snapshot.text); onAddToNote(snapshot.text); setFlash(true); window.clearTimeout(flashTimer.current); flashTimer.current = window.setTimeout(() => { window.getSelection()?.removeAllRanges(); setFlash(false) }, FLASH_DURATION) }
+  const openFeedback = () => { if (!snapshot) return; setFeedbackDraft({ selectedText: snapshot.text, context: feedbackContextFromSelection(snapshot.text) }); setFeedbackText(''); dispatch({ type: 'reset' }); setRefineText(''); setShowRefineInput(false) }
+  const closeFeedback = () => { if (!isFeedbackBusy(state.phase)) resetFeedback() }
 
   const submitFeedback = async () => {
     if (!feedbackDraft || !onSubmitCourseFeedback) return
     const normalized = feedbackText.trim()
-    if (!normalized) {
-      setFeedbackStatus('error')
-      setFeedbackMessage('请先写下你的课程意见。')
-      return
-    }
-    setFeedbackStatus('submitting')
-    setFeedbackMessage('')
-    try {
-      const result = await onSubmitCourseFeedback({ selectedText: feedbackDraft.selectedText, userComment: normalized, context: feedbackDraft.context })
-      setFeedbackId(result.feedbackId)
-      if (result.rewriteProposal) {
-        setProposal(result.rewriteProposal)
-        setFeedbackStatus('preview')
-        setFeedbackMessage(result.message || '反馈意见1已记录，并生成了当前片段优化建议。')
-      } else {
-        setFeedbackStatus('success')
-        setFeedbackMessage(result.message || result.rewriteError || '反馈意见已记录，但暂未生成改写建议。')
-      }
-    } catch (error) {
-      setFeedbackStatus('error')
-      setFeedbackMessage(error instanceof Error ? error.message : '课程意见提交失败，请稍后再试。')
-    }
+    if (!normalized) { dispatch({ type: 'failure', message: '请先写下你的课程意见。' }); return }
+    dispatch({ type: 'working', phase: 'submitting' })
+    try { dispatch({ type: 'submitted', result: await onSubmitCourseFeedback({ selectedText: feedbackDraft.selectedText, userComment: normalized, context: feedbackDraft.context }) }) }
+    catch (error) { dispatch({ type: 'failure', message: error instanceof Error ? error.message : '课程意见提交失败，请稍后再试。' }) }
   }
-
+  const retryProposal = async () => {
+    if (!state.feedbackId || !onRetryCourseFeedback) return
+    dispatch({ type: 'working', phase: 'submitting', message: '正在重试生成修改建议…' })
+    try {
+      const result = await onRetryCourseFeedback(state.feedbackId)
+      if (result.rewriteProposal) dispatch({ type: 'proposal', feedbackId: state.feedbackId, proposal: { ...result.rewriteProposal, feedbackId: state.feedbackId }, message: result.message })
+      else dispatch({ type: 'failure', message: result.rewriteError || result.message || '仍未生成修改建议。' })
+    } catch (error) { dispatch({ type: 'failure', message: error instanceof Error ? error.message : '重试失败，请稍后再试。' }) }
+  }
+  const abandon = async () => {
+    if (!state.feedbackId) { resetFeedback(); return }
+    try { if (onAbandonCourseFeedback) await onAbandonCourseFeedback(state.feedbackId); dispatch({ type: 'abandoned' }); successTimer.current = window.setTimeout(resetFeedback, 700) }
+    catch (error) { dispatch({ type: 'failure', message: error instanceof Error ? error.message : '放弃失败，请稍后重试。', preserveProposal: true }) }
+  }
   const refineProposal = async () => {
-    if (!proposal) {
-      setFeedbackMessage('当前没有可继续修改的优化版本，请先提交反馈生成一次优化。')
-      return
-    }
-    const activeFeedbackId = feedbackId || proposal.feedbackId
-    if (!activeFeedbackId) {
-      setFeedbackMessage('缺少反馈记录 ID，无法继续修改；请重新提交反馈。')
-      return
-    }
-    if (!onRefineCourseFeedback) {
-      setFeedbackMessage('当前页面尚未接入继续修改接口，请刷新页面后重试。')
-      return
-    }
-    const normalized = refineText.trim()
-    if (!normalized) {
-      setFeedbackMessage('请先写下希望继续修改的意见。')
-      return
-    }
-    setFeedbackStatus('refining')
-    setFeedbackMessage('正在根据反馈意见2重新生成，请稍候...')
-    try {
-      const result = await onRefineCourseFeedback(activeFeedbackId, normalized, proposal.rewrittenText)
-      setProposal({ ...result.rewriteProposal, originalText: proposal.originalText, target: proposal.target })
-      setFeedbackStatus('preview')
-      setShowRefineInput(false)
-      setRefineText('')
-      setFeedbackMessage('已根据反馈意见2重新生成优化版本。')
-    } catch (error) {
-      setFeedbackStatus('preview')
-      setFeedbackMessage(error instanceof Error ? error.message : '继续修改失败，请稍后再试。')
-    }
+    if (!state.proposal || !state.feedbackId || !onRefineCourseFeedback) return
+    const normalized = refineText.trim(); if (!normalized) { dispatch({ type: 'failure', message: '请先写下希望继续修改的意见。', preserveProposal: true }); return }
+    dispatch({ type: 'working', phase: 'refining', message: '正在重新生成…' })
+    try { const result = await onRefineCourseFeedback(state.feedbackId, normalized, state.proposal.rewrittenText); dispatch({ type: 'proposal', feedbackId: result.feedbackId, proposal: { ...result.rewriteProposal, originalText: state.proposal.originalText, target: state.proposal.target }, message: '已根据补充意见更新建议。' }); setShowRefineInput(false); setRefineText('') }
+    catch (error) { dispatch({ type: 'failure', message: error instanceof Error ? error.message : '继续修改失败，请稍后再试。', preserveProposal: true }) }
   }
-
   const applyRewrite = async () => {
-    if (!proposal) {
-      setFeedbackMessage('当前没有可替换的优化版本，请先生成优化。')
-      return
-    }
-    const activeFeedbackId = feedbackId || proposal.feedbackId
-    if (!activeFeedbackId) {
-      setFeedbackMessage('缺少反馈记录 ID，无法确认替换；请重新提交反馈。')
-      return
-    }
-    if (!onApplyCourseFeedbackRewrite) {
-      setFeedbackMessage('当前页面尚未接入确认替换接口，请刷新页面后重试。')
-      return
-    }
-    setFeedbackStatus('applying')
-    setFeedbackMessage('正在替换当前课程内容，请稍候...')
-    try {
-      const message = await onApplyCourseFeedbackRewrite(activeFeedbackId, proposal.originalText, proposal.rewrittenText, proposal.target)
-      setFeedbackStatus('success')
-      setFeedbackMessage(message || '已确认替换当前课程内容。')
-      window.setTimeout(() => {
-        window.getSelection()?.removeAllRanges()
-        resetFeedback()
-      }, 900)
-    } catch (error) {
-      setFeedbackStatus('preview')
-      setFeedbackMessage(error instanceof Error ? error.message : '确认替换失败，请稍后再试。')
-    }
+    if (!state.proposal || !state.feedbackId || !onApplyCourseFeedbackRewrite) return
+    dispatch({ type: 'working', phase: 'applying', message: '正在应用服务端最新修改建议…' })
+    try { const message = await onApplyCourseFeedbackRewrite(state.feedbackId, state.rememberPreference); dispatch({ type: 'success', message: message || '已应用当前课程修改。' }); successTimer.current = window.setTimeout(() => { window.getSelection()?.removeAllRanges(); resetFeedback() }, 900) }
+    catch (error) { dispatch({ type: 'failure', message: error instanceof Error ? error.message : '确认修改失败，请稍后再试。', preserveProposal: true }) }
   }
 
   let toolbar = null
-  if (snapshot && !feedbackDraft && typeof document !== 'undefined') {
-    const rect = snapshot.rect
-    const placeBelow = rect.top < TOOLBAR_HEIGHT + GAP + 8
-    const top = placeBelow ? rect.bottom + GAP : rect.top - TOOLBAR_HEIGHT - GAP
-    const left = Math.max(EDGE_PADDING, Math.min(rect.left + rect.width / 2, window.innerWidth - EDGE_PADDING))
-    toolbar = createPortal(
-      <div className="selection-to-note-toolbar" role="toolbar" aria-label="选区操作" style={{ top, left }}>
-        <button type="button" className={flash ? 'is-done' : ''} onMouseDown={(event) => event.preventDefault()} onClick={handleAdd}>
-          {flash ? <Check size={14} /> : <NotebookPen size={14} />}
-          {flash ? '已加入笔记' : '添加到笔记'}
-        </button>
-        {onSubmitCourseFeedback && (
-          <button type="button" className="is-feedback" onMouseDown={(event) => event.preventDefault()} onClick={openFeedback}>
-            <MessageSquareText size={14} />
-            课程意见反馈
-          </button>
-        )}
-      </div>,
-      document.body,
-    )
-  }
-
-  const busy = feedbackStatus === 'submitting' || feedbackStatus === 'refining' || feedbackStatus === 'applying'
-  const dialog = feedbackDraft && typeof document !== 'undefined'
-    ? createPortal(
-        <div className="course-feedback-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeFeedback() }}>
-          <section className="course-feedback-dialog" role="dialog" aria-modal="true" aria-label="课程意见反馈">
-            <header>
-              <div>
-                <span>课程意见反馈</span>
-                <h2>{proposal ? '课程内容优化建议' : '这段课程内容哪里需要优化？'}</h2>
-              </div>
-              <button type="button" className="course-feedback-close" onClick={closeFeedback} aria-label="关闭"><X size={18} /></button>
-            </header>
-            {!proposal ? (
-              <>
-                <div className="course-feedback-selected"><strong>被反馈内容</strong><p>{feedbackDraft.selectedText}</p></div>
-                <label className="course-feedback-input">
-                  <span>反馈意见1</span>
-                  <textarea value={feedbackText} onChange={(event) => setFeedbackText(event.target.value)} placeholder="例如：这段太像百科定义了，希望先讲怎么用，再解释原理，并加一个具体例子。" rows={5} autoFocus disabled={busy || feedbackStatus === 'success'} />
-                </label>
-              </>
-            ) : (
-              <>
-                <p className="course-feedback-hint">
-                  反馈意见1已记录到优化库。当前替换目标：{String(proposal.target?.sourceArea ?? '课程内容')} / {String(proposal.target?.examPointId ?? proposal.target?.exampleId ?? proposal.target?.conceptTitle ?? proposal.target?.taskId ?? '当前选区')}。跨段选择会按划选时记录的结构锚点自动精确替换，你可以直接确认，或继续提出反馈意见2让 Agent 再改。
-                </p>
-                <div className="course-feedback-context-strip">
-                  <p><strong>前文</strong>{feedbackDraft.context.beforeText || '（当前选区前没有更多同块内容）'}</p>
-                </div>
-                <div className="course-feedback-compare">
-                  <section><strong>修改前</strong><p>{proposal.originalText}</p></section>
-                  <section><strong>修改后</strong>{proposal.rewrittenText ? <p>{proposal.rewrittenText}</p> : <p className="course-feedback-delete-preview">这段内容将被删除</p>}</section>
-                </div>
-                <div className="course-feedback-context-strip is-after">
-                  <p><strong>后文</strong>{feedbackDraft.context.afterText || '（当前选区后没有更多同块内容）'}</p>
-                </div>
-                {proposal.rationale && <p className="course-feedback-rationale">改写说明：{proposal.rationale}</p>}
-
-                {showRefineInput && (
-                  <label className="course-feedback-input">
-                    <span>反馈意见2</span>
-                    <textarea value={refineText} onChange={(event) => setRefineText(event.target.value)} placeholder="例如：这版还是太长，希望压缩成两条短句。" rows={3} autoFocus disabled={busy} />
-                  </label>
-                )}
-              </>
-            )}
-            {feedbackMessage && <p className={'course-feedback-message is-' + feedbackStatus}>{feedbackMessage}</p>}
-            <footer>
-              {!proposal ? (
-                <>
-                  <button type="button" className="ghost-button" onClick={closeFeedback} disabled={busy}>取消</button>
-                  <button type="button" className="primary-button" onClick={submitFeedback} disabled={busy || feedbackStatus === 'success'}>{feedbackStatus === 'submitting' ? '生成中...' : '提交并生成优化'}</button>
-                </>
-              ) : showRefineInput ? (
-                <>
-                  <button type="button" className="ghost-button" onClick={() => setShowRefineInput(false)} disabled={busy}>返回对比</button>
-                  <button
-                    type="button"
-                    className="primary-button"
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => {
-                      setFeedbackMessage('已点击重新生成，正在准备请求...')
-                      void refineProposal()
-                    }}
-                    disabled={busy}
-                  >
-                    {feedbackStatus === 'refining' ? '重新生成中...' : '重新生成'}
-                  </button>
-                </>
-              ) : (
-                <>
-                  <button type="button" className="ghost-button" onClick={closeFeedback} disabled={busy}>取消替换</button>
-                  <button type="button" className="ghost-button" onClick={() => setShowRefineInput(true)} disabled={busy}>继续修改</button>
-                  <button type="button" className="primary-button" onClick={applyRewrite} disabled={busy}>{feedbackStatus === 'applying' ? '应用中...' : proposal.rewrittenText ? '确认替换' : '确认删除'}</button>
-                </>
-              )}
-            </footer>
-          </section>
-        </div>,
-        document.body,
-      )
-    : null
-
+  if (snapshot && !feedbackDraft && typeof document !== 'undefined') { const rect = snapshot.rect; const top = rect.top < TOOLBAR_HEIGHT + GAP + 8 ? rect.bottom + GAP : rect.top - TOOLBAR_HEIGHT - GAP; const left = Math.max(EDGE_PADDING, Math.min(rect.left + rect.width / 2, window.innerWidth - EDGE_PADDING)); toolbar = createPortal(<div className="selection-to-note-toolbar" role="toolbar" aria-label="选区操作" style={{ top, left }}><button type="button" className={flash ? 'is-done' : ''} onMouseDown={(event) => event.preventDefault()} onClick={handleAdd}>{flash ? <Check size={14} /> : <NotebookPen size={14} />}{flash ? '已加入笔记' : '添加到笔记'}</button>{onSubmitCourseFeedback && <button type="button" className="is-feedback" onMouseDown={(event) => event.preventDefault()} onClick={openFeedback}><MessageSquareText size={14} />课程意见反馈</button>}</div>, document.body) }
+  const busy = isFeedbackBusy(state.phase)
+  const dialog = feedbackDraft && typeof document !== 'undefined' ? createPortal(<div className="course-feedback-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeFeedback() }}><section className="course-feedback-dialog" role="dialog" aria-modal="true" aria-label="课程意见反馈"><header><div><span>课程意见反馈</span><h2>{state.proposal ? '课程内容优化建议' : state.phase === 'partial-success' ? '反馈已保存，建议生成失败' : '这段课程内容哪里需要优化？'}</h2></div><button type="button" className="course-feedback-close" onClick={closeFeedback} aria-label="关闭"><X size={18} /></button></header>
+  {!state.proposal ? <><div className="course-feedback-selected"><strong>被反馈内容</strong><p>{feedbackDraft.selectedText}</p></div>{state.phase !== 'partial-success' && <label className="course-feedback-input"><span>反馈意见</span><textarea value={feedbackText} onChange={(event) => setFeedbackText(event.target.value)} rows={5} autoFocus disabled={busy || state.phase === 'success'} /></label>}</> : <><CourseFeedbackPreview proposal={state.proposal} context={feedbackDraft.context} rememberPreference={state.rememberPreference} onRememberPreferenceChange={(value) => dispatch({ type: 'remember', value })} />{showRefineInput && <label className="course-feedback-input"><span>补充意见</span><textarea value={refineText} onChange={(event) => setRefineText(event.target.value)} rows={3} autoFocus disabled={busy} /></label>}</>}
+  {state.message && <p className={'course-feedback-message is-' + state.phase}>{state.message}</p>}
+  <footer>{!state.proposal ? state.phase === 'partial-success' ? <><button type="button" className="ghost-button" onClick={abandon} disabled={busy}>放弃</button><button type="button" className="primary-button" onClick={retryProposal} disabled={busy || !onRetryCourseFeedback}><RotateCcw size={15} />重试生成修改建议</button></> : <><button type="button" className="ghost-button" onClick={closeFeedback} disabled={busy}>取消</button><button type="button" className="primary-button" onClick={submitFeedback} disabled={busy || state.phase === 'success'}>{state.phase === 'submitting' ? '生成中…' : '提交并生成优化'}</button></> : showRefineInput ? <><button type="button" className="ghost-button" onClick={() => setShowRefineInput(false)} disabled={busy}>返回对比</button><button type="button" className="primary-button" onClick={() => void refineProposal()} disabled={busy}>{state.phase === 'refining' ? '重新生成中…' : '重新生成'}</button></> : <><button type="button" className="ghost-button" onClick={closeFeedback} disabled={busy}>保留并关闭</button><button type="button" className="ghost-button" onClick={abandon} disabled={busy}>放弃</button><button type="button" className="ghost-button" onClick={() => setShowRefineInput(true)} disabled={busy}>继续修改</button><button type="button" className="primary-button" onClick={applyRewrite} disabled={busy}>{state.phase === 'applying' ? '应用中…' : state.proposal.rewrittenText ? '确认替换' : '确认删除'}</button></>}</footer></section></div>, document.body) : null
   return <>{toolbar}{dialog}</>
 }

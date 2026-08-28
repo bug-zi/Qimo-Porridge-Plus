@@ -44,6 +44,7 @@ import {
 } from '../apiClient'
 import type { BackupModelProfile, ModelProfilesResponse } from '../api'
 import { BilibiliCredentialDialog } from './BilibiliCredentialDialog'
+import { CoursePreferencesPanel } from './CoursePreferencesPanel'
 import { authFetch, type AuthUser } from '../auth'
 import type {
   BilibiliCredentialStatus,
@@ -1047,6 +1048,7 @@ export function SettingsView({
       </div>
 
       <div className="settings-layout">
+        <div className="settings-main">
         <section className="settings-panel model-settings-panel">
           <header className="settings-panel-heading">
             <div className="settings-heading-icon"><Bot size={19} /></div>
@@ -1446,6 +1448,8 @@ export function SettingsView({
             </div>
           </div>
         </section>
+        <CoursePreferencesPanel courseId={courseId} />
+        </div>
 
         <aside className="settings-side">
           <section className="settings-panel profile-summary-panel">

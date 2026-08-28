@@ -4,10 +4,17 @@ import json
 import re
 import uuid
 from datetime import datetime
-from pathlib import Path
+from functools import wraps
 from typing import Any, Callable
 
-from .study_service import _atomic_write_text, _course_data_directory
+from .course_feedback_store import (
+    course_feedback_lock as _course_feedback_lock,
+    mutate_feedback_entries as _mutate_feedback_entries,
+    read_feedback_entries as _store_read_feedback_entries,
+    read_rules_store as _store_read_rules_store,
+    write_feedback_entries as _store_write_feedback_entries,
+    write_rules_store as _store_write_rules_store,
+)
 
 JsonModelCall = Callable[[str, str, str], dict[str, Any]]
 
@@ -18,22 +25,21 @@ MAX_CONTEXT_TEXT_LENGTH = 8000
 MAX_RULES = 24
 MAX_RULE_PROMPT_CHARS = 5000
 MAX_STRONG_DIRECTIVES = 40
+MAX_SESSION_ATTEMPTS = 8
+TERMINAL_FEEDBACK_STATUSES = {"accepted", "abandoned", "expired"}
+
+
+def _locked_course_feedback(operation: Callable[..., Any]) -> Callable[..., Any]:
+    """Hold one course RLock across a complete service transaction."""
+    @wraps(operation)
+    def wrapped(course_id: str, *args: Any, **kwargs: Any) -> Any:
+        with _course_feedback_lock(course_id):
+            return operation(course_id, *args, **kwargs)
+    return wrapped
 
 
 def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
-
-
-def _feedback_directory(course_id: str) -> Path:
-    return _course_data_directory(course_id) / "feedback"
-
-
-def _feedback_log_path(course_id: str) -> Path:
-    return _feedback_directory(course_id) / "feedback.jsonl"
-
-
-def _rules_path(course_id: str) -> Path:
-    return _feedback_directory(course_id) / "optimization_rules.json"
 
 
 def _clip_text(value: Any, limit: int) -> str:
@@ -70,56 +76,26 @@ def _safe_context(payload: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _read_feedback_entries(course_id: str) -> list[dict[str, Any]]:
-    path = _feedback_log_path(course_id)
-    if not path.exists():
-        return []
-    entries: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(item, dict):
-            entries.append(item)
-    return entries
+    return _store_read_feedback_entries(course_id)
 
 
 def _write_feedback_entries(course_id: str, entries: list[dict[str, Any]]) -> None:
-    content = "\n".join(json.dumps(item, ensure_ascii=False, sort_keys=True) for item in entries)
-    _atomic_write_text(_feedback_log_path(course_id), content + ("\n" if content else ""))
+    _store_write_feedback_entries(course_id, entries)
 
 
 def _read_rules_store(course_id: str) -> dict[str, Any]:
-    path = _rules_path(course_id)
-    if not path.exists():
-        return {"version": FEEDBACK_VERSION, "rules": [], "strongDirectives": [], "summaryPrompt": "", "updatedAt": ""}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {"version": FEEDBACK_VERSION, "rules": [], "strongDirectives": [], "summaryPrompt": "", "updatedAt": ""}
-    if not isinstance(payload, dict):
-        return {"version": FEEDBACK_VERSION, "rules": [], "strongDirectives": [], "summaryPrompt": "", "updatedAt": ""}
-    rules = payload.get("rules") if isinstance(payload.get("rules"), list) else []
-    return {
-        "version": int(payload.get("version") or FEEDBACK_VERSION),
-        "rules": [rule for rule in rules if isinstance(rule, dict)],
-        "strongDirectives": [item for item in payload.get("strongDirectives", []) if isinstance(item, dict)][:MAX_STRONG_DIRECTIVES],
-        "summaryPrompt": str(payload.get("summaryPrompt") or ""),
-        "updatedAt": str(payload.get("updatedAt") or ""),
-    }
+    return _store_read_rules_store(course_id)
 
 
 def _write_rules_store(course_id: str, store: dict[str, Any]) -> None:
-    store = {
+    normalized = {
         "version": FEEDBACK_VERSION,
         "rules": store.get("rules", []),
         "strongDirectives": store.get("strongDirectives", [])[:MAX_STRONG_DIRECTIVES],
         "summaryPrompt": _clip_text(store.get("summaryPrompt", ""), MAX_RULE_PROMPT_CHARS),
         "updatedAt": _now_iso(),
     }
-    _atomic_write_text(_rules_path(course_id), json.dumps(store, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    _store_write_rules_store(course_id, normalized)
 
 
 def _slug(value: str) -> str:
@@ -131,7 +107,7 @@ def _normalize_rule(candidate: dict[str, Any], feedback_id: str) -> dict[str, An
     title = _clip_text(candidate.get("title") or "课程表达优化规则", 80)
     return {
         "id": f"crule_{_slug(title)}_{uuid.uuid4().hex[:8]}",
-        "status": "active",
+        "status": "proposed",
         "type": _clip_text(candidate.get("type") or "teaching_style", 40),
         "title": title,
         "description": _clip_text(candidate.get("description") or candidate.get("preferredPattern") or title, 500),
@@ -154,8 +130,10 @@ def _merge_rule(rules: list[dict[str, Any]], candidate: dict[str, Any], feedback
             str(rule.get("type", "")).strip().lower() == next_type
             and str(rule.get("preferredPattern", "")).strip() == next_rule["preferredPattern"]
         ):
-            source_ids = list(dict.fromkeys([*(rule.get("sourceFeedbackIds") or []), feedback_id]))
-            rule["sourceFeedbackIds"] = source_ids
+            if rule.get("status") == "active":
+                rule["proposedSourceFeedbackIds"] = list(dict.fromkeys([*(rule.get("proposedSourceFeedbackIds") or []), feedback_id]))
+            else:
+                rule["sourceFeedbackIds"] = list(dict.fromkeys([*(rule.get("sourceFeedbackIds") or []), feedback_id]))
             rule["description"] = next_rule["description"] or rule.get("description", "")
             rule["preferredPattern"] = next_rule["preferredPattern"] or rule.get("preferredPattern", "")
             rule["badPattern"] = next_rule["badPattern"] or rule.get("badPattern", "")
@@ -166,7 +144,7 @@ def _merge_rule(rules: list[dict[str, Any]], candidate: dict[str, Any], feedback
 
 
 def _build_summary_prompt(rules: list[dict[str, Any]]) -> str:
-    active = [rule for rule in rules if rule.get("status", "active") == "active"][:12]
+    active = [rule for rule in rules if rule.get("status") == "active"][:12]
     if not active:
         return ""
     lines = [
@@ -187,7 +165,7 @@ def _strong_directive_from_feedback(feedback: dict[str, Any]) -> dict[str, Any]:
     context = feedback.get("context") if isinstance(feedback.get("context"), dict) else {}
     return {
         "id": f"directive_{feedback.get('id', uuid.uuid4().hex[:8])}",
-        "status": "active",
+        "status": "proposed",
         "strength": "must",
         "scope": str(context.get("feedbackScope") or "selection"),
         "sectionId": str(context.get("sectionId") or ""),
@@ -215,13 +193,139 @@ def get_course_strong_directives(course_id: str) -> list[dict[str, Any]]:
     for feedback in reversed(_read_feedback_entries(course_id)):
         context = feedback.get("context") if isinstance(feedback.get("context"), dict) else {}
         feedback_id = str(feedback.get("id") or "")
-        if feedback_id not in known and context.get("feedbackScope") in {"section", "global"} and str(feedback.get("userComment") or "").strip():
-            merged.append(_strong_directive_from_feedback(feedback)); known.add(feedback_id)
+        status = str(feedback.get("status") or "")
+        session = feedback.get("rewriteSession") if isinstance(feedback.get("rewriteSession"), dict) else {}
+        legacy_accepted = status == "accepted" or session.get("status") == "accepted" or bool(session.get("acceptedRewrite") or session.get("acceptedGlobalRewrite"))
+        if feedback_id not in known and legacy_accepted and context.get("feedbackScope") in {"section", "global"} and str(feedback.get("userComment") or "").strip():
+            directive = _strong_directive_from_feedback(feedback)
+            directive["status"] = "active"
+            merged.append(directive); known.add(feedback_id)
     return merged[:MAX_STRONG_DIRECTIVES]
+
+
+def _activate_feedback_preference(course_id: str, feedback: dict[str, Any], remember_preference: bool) -> None:
+    feedback_id = str(feedback.get("id") or "")
+    store = _read_rules_store(course_id)
+    for rule in store.get("rules", []):
+        proposed_ids = list(rule.get("proposedSourceFeedbackIds") or [])
+        source_ids = list(rule.get("sourceFeedbackIds") or [])
+        if feedback_id not in source_ids and feedback_id not in proposed_ids:
+            continue
+        rule["proposedSourceFeedbackIds"] = [item for item in proposed_ids if item != feedback_id]
+        if remember_preference:
+            rule["sourceFeedbackIds"] = list(dict.fromkeys([*source_ids, feedback_id]))
+            rule["status"] = "active"
+        elif rule.get("status") != "active":
+            rule["sourceFeedbackIds"] = [item for item in source_ids if item != feedback_id]
+            rule["status"] = "inactive" if not rule["sourceFeedbackIds"] else rule.get("status")
+        rule["updatedAt"] = _now_iso()
+    for directive in store.get("strongDirectives", []):
+        if str(directive.get("sourceFeedbackId") or "") == feedback_id:
+            directive["status"] = "active" if remember_preference else "inactive"
+    store["summaryPrompt"] = _build_summary_prompt(store.get("rules", []))
+    _write_rules_store(course_id, store)
+
+
+def _compact_feedback_session(feedback: dict[str, Any]) -> None:
+    session = feedback.get("rewriteSession") if isinstance(feedback.get("rewriteSession"), dict) else None
+    if not session:
+        return
+    attempts = session.get("attempts") if isinstance(session.get("attempts"), list) else []
+    session["attemptCount"] = len(attempts)
+    session["attempts"] = [
+        {key: item.get(key) for key in ("version", "inputComment", "accepted", "createdAt")}
+        for item in attempts[-2:] if isinstance(item, dict)
+    ]
+    session.pop("latestProposal", None)
+
+
+def get_open_course_feedback(course_id: str) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    for feedback in reversed(_read_feedback_entries(course_id)):
+        context = feedback.get("context") if isinstance(feedback.get("context"), dict) else {}
+        session = feedback.get("rewriteSession") if isinstance(feedback.get("rewriteSession"), dict) else {}
+        proposal = session.get("latestProposal") if isinstance(session.get("latestProposal"), dict) else None
+        # The selection toolbar can only restore fragment proposals. Section-wide proposals have a
+        # different shape and remain owned by AiCompanion.
+        if context.get("feedbackScope") in {"section", "global"} or not proposal or "originalText" not in proposal:
+            continue
+        if session.get("status") == "open" or feedback.get("status") == "awaiting_confirmation":
+            items.append({
+                "feedbackId": str(feedback.get("id") or ""),
+                "status": str(feedback.get("status") or "awaiting_confirmation"),
+                "selectedText": str(feedback.get("selectedText") or ""),
+                "userComment": str(feedback.get("userComment") or ""),
+                "context": context,
+                "rewriteProposal": proposal,
+                "rewriteError": str(feedback.get("rewriteError") or ""),
+            })
+    return {"items": items}
 
 
 def get_course_feedback_rules(course_id: str) -> dict[str, Any]:
     return _read_rules_store(course_id)
+
+
+@_locked_course_feedback
+def update_course_feedback_rule(course_id: str, rule_id: str, *, status: str) -> dict[str, Any]:
+    if status not in {"active", "inactive", "proposed"}:
+        raise ValueError("规则状态无效")
+    store = _read_rules_store(course_id)
+    rule = next((item for item in store.get("rules", []) if str(item.get("id") or "") == rule_id), None)
+    if not rule:
+        raise ValueError("反馈规则不存在")
+    rule.update({"status": status, "updatedAt": _now_iso()})
+    for directive in store.get("strongDirectives", []):
+        source = str(directive.get("sourceFeedbackId") or "")
+        if source in (rule.get("sourceFeedbackIds") or []):
+            directive["status"] = "active" if status == "active" else "inactive"
+    store["summaryPrompt"] = _build_summary_prompt(store.get("rules", []))
+    _write_rules_store(course_id, store)
+    return {"rule": rule, "rules": store}
+
+
+@_locked_course_feedback
+def delete_course_feedback_rule(course_id: str, rule_id: str) -> dict[str, Any]:
+    store = _read_rules_store(course_id)
+    matches = [item for item in store.get("rules", []) if str(item.get("id") or "") == rule_id]
+    if not matches:
+        raise ValueError("反馈规则不存在")
+    source_ids = set(matches[0].get("sourceFeedbackIds") or [])
+    store["rules"] = [item for item in store.get("rules", []) if str(item.get("id") or "") != rule_id]
+    store["strongDirectives"] = [item for item in store.get("strongDirectives", []) if str(item.get("sourceFeedbackId") or "") not in source_ids]
+    store["summaryPrompt"] = _build_summary_prompt(store["rules"])
+    _write_rules_store(course_id, store)
+    return {"deletedRuleId": rule_id, "rules": store}
+
+@_locked_course_feedback
+def merge_course_feedback_rules(course_id: str, target_rule_id: str, source_rule_ids: list[str]) -> dict[str, Any]:
+    unique_source_ids = [item for item in dict.fromkeys(source_rule_ids) if item and item != target_rule_id]
+    if not unique_source_ids:
+        raise ValueError("请选择至少一条要合并的其他规则")
+    store = _read_rules_store(course_id)
+    rules = store.get("rules", []) if isinstance(store.get("rules"), list) else []
+    target = next((item for item in rules if str(item.get("id") or "") == target_rule_id), None)
+    if not target:
+        raise ValueError("目标反馈规则不存在")
+    sources = [item for item in rules if str(item.get("id") or "") in unique_source_ids]
+    if len(sources) != len(unique_source_ids):
+        raise ValueError("存在无法合并的反馈规则")
+    all_sources = [target, *sources]
+    feedback_ids: list[str] = []
+    proposed_ids: list[str] = []
+    for rule in all_sources:
+        feedback_ids.extend(str(item) for item in (rule.get("sourceFeedbackIds") or []) if item)
+        proposed_ids.extend(str(item) for item in (rule.get("proposedSourceFeedbackIds") or []) if item)
+    target["sourceFeedbackIds"] = list(dict.fromkeys(feedback_ids))
+    target["proposedSourceFeedbackIds"] = list(dict.fromkeys(proposed_ids))
+    target["weight"] = min(3.0, sum(float(item.get("weight") or 1.0) for item in all_sources))
+    target["status"] = "active" if any(item.get("status") == "active" for item in all_sources) else str(target.get("status") or "proposed")
+    target["updatedAt"] = _now_iso()
+    source_rule_id_set = set(unique_source_ids)
+    store["rules"] = [item for item in rules if str(item.get("id") or "") not in source_rule_id_set]
+    store["summaryPrompt"] = _build_summary_prompt(store["rules"])
+    _write_rules_store(course_id, store)
+    return {"targetRuleId": target_rule_id, "mergedRuleIds": unique_source_ids, "rule": target, "rules": store}
 
 
 def get_course_feedback_rules_prompt(course_id: str) -> str:
@@ -275,6 +379,7 @@ def analyze_feedback_entry(course_id: str, feedback: dict[str, Any], model_json:
     return result
 
 
+@_locked_course_feedback
 def submit_course_feedback(
     course_id: str,
     *,
@@ -377,7 +482,7 @@ def generate_rewrite_proposal(
         "userComment2": refinement_comment,
         "languageRules": rules_prompt,
     }
-    deletion_requested = any(phrase in comment for phrase in ("删除", "删掉", "去掉", "移除", "不要这段", "不需要这段"))
+    deletion_requested = any(phrase in comment for phrase in ("删除", "删掉", "删去", "去掉", "移除", "不要这段", "不需要这段"))
     if deletion_requested:
         return {
             "feedbackId": feedback_id, "originalText": selected, "rewrittenText": "",
@@ -413,6 +518,7 @@ def generate_rewrite_proposal(
     }
 
 
+@_locked_course_feedback
 def submit_course_feedback_with_rewrite(
     course_id: str,
     *,
@@ -441,9 +547,17 @@ def submit_course_feedback_with_rewrite(
         )
         _append_rewrite_attempt(course_id, str(result["feedbackId"]), proposal, user_comment, "previewed")
         result["rewriteProposal"] = proposal
+        result.update({"status": "awaiting_confirmation", "feedbackSaved": True, "analysisStatus": result.get("status"), "proposalStatus": "ready", "canRetryProposal": False})
         result["message"] = "课程意见已记录，并已生成当前片段优化建议。"
     except Exception as error:
-        result["rewriteError"] = str(error)
+        error_text = _clip_text(error, 1000)
+        def persist_error(entries: list[dict[str, Any]]) -> None:
+            feedback = _find_feedback(entries, str(result["feedbackId"]))
+            feedback["rewriteError"] = error_text
+            feedback["status"] = "analyzed" if feedback.get("analysis") else "analysis_failed"
+        _mutate_feedback_entries(course_id, persist_error)
+        result.update({"feedbackSaved": True, "analysisStatus": result.get("status"), "proposalStatus": "failed", "rewriteError": error_text, "canRetryProposal": True})
+        result["message"] = "反馈已保存，但修改建议生成失败。"
     return result
 
 
@@ -454,24 +568,51 @@ def _find_feedback(entries: list[dict[str, Any]], feedback_id: str) -> dict[str,
     raise ValueError("反馈记录不存在")
 
 
+@_locked_course_feedback
 def _append_rewrite_attempt(course_id: str, feedback_id: str, proposal: dict[str, Any], input_comment: str, status: str) -> None:
+    # Keep the service read/write seams for existing callers and tests; the default implementations
+    # delegate to the per-course locked store.
     entries = _read_feedback_entries(course_id)
     feedback = _find_feedback(entries, feedback_id)
-    session = feedback.setdefault("rewriteSession", {"status": status, "attempts": []})
+    if feedback.get("status") in TERMINAL_FEEDBACK_STATUSES:
+        raise ValueError("反馈会话已结束，不能继续修改")
+    session = feedback.setdefault("rewriteSession", {"status": "open", "attempts": []})
     attempts = session.setdefault("attempts", [])
-    attempts.append({
-        "version": len(attempts) + 1,
-        "inputComment": _clip_text(input_comment, MAX_USER_COMMENT_LENGTH),
-        "rewrittenText": proposal.get("rewrittenText", ""),
-        "rationale": proposal.get("rationale", ""),
-        "accepted": False,
-        "createdAt": _now_iso(),
-    })
-    session["status"] = status
-    session["latestProposal"] = proposal
+    if len(attempts) >= MAX_SESSION_ATTEMPTS:
+        raise ValueError("同一反馈最多可修改 8 轮，请开始新的反馈会话")
+    attempts.append({"version": len(attempts) + 1, "inputComment": _clip_text(input_comment, MAX_USER_COMMENT_LENGTH), "rewrittenText": proposal.get("rewrittenText", ""), "rationale": proposal.get("rationale", ""), "accepted": False, "createdAt": _now_iso()})
+    session.update({"status": "open", "phase": status, "latestProposal": proposal, "updatedAt": _now_iso()})
+    feedback.update({"status": "awaiting_confirmation", "rewriteError": ""})
     _write_feedback_entries(course_id, entries)
 
 
+@_locked_course_feedback
+def retry_course_feedback_proposal(course_id: str, feedback_id: str, *, model_json: JsonModelCall) -> dict[str, Any]:
+    feedback = _find_feedback(_read_feedback_entries(course_id), feedback_id)
+    if feedback.get("status") in TERMINAL_FEEDBACK_STATUSES:
+        raise ValueError("反馈会话已结束，不能重试")
+    proposal = generate_rewrite_proposal(course_id, feedback_id, selected_text=str(feedback.get("selectedText") or ""), user_comment=str(feedback.get("userComment") or ""), context=feedback.get("context") if isinstance(feedback.get("context"), dict) else {}, model_json=model_json)
+    _append_rewrite_attempt(course_id, feedback_id, proposal, "重试生成修改建议", "retry_previewed")
+    return {"feedbackId": feedback_id, "status": "awaiting_confirmation", "proposalStatus": "ready", "rewriteProposal": proposal, "canRetryProposal": False}
+
+
+@_locked_course_feedback
+def abandon_course_feedback(course_id: str, feedback_id: str) -> dict[str, Any]:
+    def mutation(entries: list[dict[str, Any]]) -> None:
+        feedback = _find_feedback(entries, feedback_id)
+        if feedback.get("status") == "accepted":
+            raise ValueError("已应用的反馈不能放弃")
+        feedback["status"] = "abandoned"
+        session = feedback.setdefault("rewriteSession", {"attempts": []})
+        session.update({"status": "abandoned", "abandonedAt": _now_iso()})
+        _compact_feedback_session(feedback)
+    _mutate_feedback_entries(course_id, mutation)
+    feedback = _find_feedback(_read_feedback_entries(course_id), feedback_id)
+    _activate_feedback_preference(course_id, feedback, False)
+    return {"feedbackId": feedback_id, "status": "abandoned", "message": "已放弃本次修改建议。"}
+
+
+@_locked_course_feedback
 def refine_course_feedback_rewrite(
     course_id: str,
     feedback_id: str,
@@ -482,6 +623,11 @@ def refine_course_feedback_rewrite(
 ) -> dict[str, Any]:
     entries = _read_feedback_entries(course_id)
     feedback = _find_feedback(entries, feedback_id)
+    session = feedback.get("rewriteSession") if isinstance(feedback.get("rewriteSession"), dict) else {}
+    latest = session.get("latestProposal") if isinstance(session.get("latestProposal"), dict) else {}
+    authoritative_previous = str(latest.get("rewrittenText") or "")
+    if not latest:
+        raise ValueError("找不到服务端保存的修改建议")
     proposal = generate_rewrite_proposal(
         course_id,
         feedback_id,
@@ -489,7 +635,7 @@ def refine_course_feedback_rewrite(
         user_comment=str(feedback.get("userComment", "")),
         context=feedback.get("context") if isinstance(feedback.get("context"), dict) else {},
         model_json=model_json,
-        previous_rewrite=previous_rewrite,
+        previous_rewrite=authoritative_previous,
         refinement_comment=extra_comment,
     )
     _append_rewrite_attempt(course_id, feedback_id, proposal, extra_comment, "refining")
@@ -896,19 +1042,40 @@ def _replace_scope_fallback(guide: dict[str, Any], target: dict[str, Any], selec
     return _replace_first_string_recursive(guide, selected, rewritten)
 
 
+@_locked_course_feedback
 def apply_course_feedback_rewrite(
     course_id: str,
     feedback_id: str,
     *,
-    target: dict[str, Any],
-    original_text: str,
-    rewritten_text: str,
+    target: dict[str, Any] | None = None,
+    original_text: str = "",
+    rewritten_text: str = "",
+    remember_preference: bool = True,
+    expected_revision: int | None = None,
 ) -> dict[str, Any]:
     from .study_service import _build_study_guide_sections, load_workspace, save_workspace
 
-    selected = _clip_text(original_text, MAX_SELECTED_TEXT_LENGTH)
+    entries = _read_feedback_entries(course_id)
+    feedback = _find_feedback(entries, feedback_id)
+    session = feedback.get("rewriteSession") if isinstance(feedback.get("rewriteSession"), dict) else {}
+    if feedback.get("status") == "accepted" and isinstance(session.get("acceptedRewrite"), dict):
+        return {"feedbackId": feedback_id, "workspace": load_workspace(course_id, refresh_materials=False), "status": "accepted", "idempotent": True, "message": "本次修改已应用。"}
+    if feedback.get("status") in {"abandoned", "expired"}:
+        raise ValueError("反馈会话已结束，不能应用")
+    proposal = session.get("latestProposal") if isinstance(session.get("latestProposal"), dict) else None
+    if not proposal:
+        raise ValueError("找不到服务端保存的修改建议")
+    selected = _clip_text(proposal.get("originalText"), MAX_SELECTED_TEXT_LENGTH)
+    rewritten = _clip_text(proposal.get("rewrittenText"), MAX_CONTEXT_TEXT_LENGTH)
+    if proposal.get("rewrittenText") != "" and not rewritten:
+        raise ValueError("服务端修改建议内容无效")
+    authoritative_target = proposal.get("target") if isinstance(proposal.get("target"), dict) else {}
+    target = dict(authoritative_target)
     task_id = str(target.get("taskId") or "")
     workspace = load_workspace(course_id, refresh_materials=False)
+    loaded_revision = int(workspace.get("revision", 0))
+    if expected_revision is not None and expected_revision != loaded_revision:
+        raise RuntimeError("学习空间已被其他操作更新，请刷新后重试")
     if not task_id:
         # 兼容修复前已经打开的反馈弹窗：旧故事页没有 taskId，但字段、章节和原文锚点仍然存在。
         # 只在课程中恰好一个任务匹配时补全，避免把内容误删到另一课。
@@ -941,9 +1108,6 @@ def apply_course_feedback_rewrite(
     guide = task.get("studyGuide") if isinstance(task.get("studyGuide"), dict) else None
     if guide is None:
         raise ValueError("当前任务没有可替换的讲义内容")
-    rewritten = _clip_text(rewritten_text, MAX_CONTEXT_TEXT_LENGTH)
-    if rewritten_text != "" and not rewritten:
-        raise ValueError("替换内容不能为空")
     replaced = (
         _replace_selection_fragments(guide, target, selected, rewritten)
         or _replace_story_section(guide, target, selected, rewritten)
@@ -959,7 +1123,7 @@ def apply_course_feedback_rewrite(
     # rewrite unrelated examples, questions, or other tasks.
     guide["sections"] = _build_study_guide_sections(guide)
     task["contentUpdatedAt"] = _now_iso()
-    save_workspace(workspace, course_id)
+    save_workspace(workspace, course_id, expected_revision=loaded_revision)
 
     entries = _read_feedback_entries(course_id)
     feedback = _find_feedback(entries, feedback_id)
@@ -972,8 +1136,11 @@ def apply_course_feedback_rewrite(
         attempts[-1]["accepted"] = True
         session["acceptedVersion"] = attempts[-1].get("version")
     feedback["status"] = "accepted"
+    feedback["rememberPreference"] = bool(remember_preference)
+    _compact_feedback_session(feedback)
     _write_feedback_entries(course_id, entries)
-    return {"feedbackId": feedback_id, "workspace": workspace, "message": "已替换当前课程内容，并记录本次确认结果。"}
+    _activate_feedback_preference(course_id, feedback, remember_preference)
+    return {"feedbackId": feedback_id, "workspace": workspace, "status": "accepted", "idempotent": False, "rememberPreference": bool(remember_preference), "message": "已替换当前课程内容，并记录本次确认结果。"}
 
 def _guide_revision_token(guide: dict[str, Any]) -> str:
     import hashlib
@@ -1015,6 +1182,7 @@ def _apply_revised_guide_section(guide: dict[str, Any], section_id: str, section
             guide[key] = json.loads(json.dumps(revised[key], ensure_ascii=False))
 
 
+@_locked_course_feedback
 def submit_global_course_feedback(
     course_id: str, *, task_id: str, section_id: str, section_index: int, user_comment: str, model_json: JsonModelCall,
 ) -> dict[str, Any]:
@@ -1062,6 +1230,7 @@ def submit_global_course_feedback(
         entries = _read_feedback_entries(course_id); feedback = _find_feedback(entries, feedback_id); feedback["globalRewriteError"] = str(error); feedback["analysisError"] = str(error); _write_feedback_entries(course_id, entries); raise
 
 
+@_locked_course_feedback
 def refine_global_course_feedback(
     course_id: str, feedback_id: str, *, extra_comment: str, model_json: JsonModelCall,
 ) -> dict[str, Any]:
@@ -1085,7 +1254,7 @@ def refine_global_course_feedback(
         raise ValueError("当前任务没有可修改的讲义内容")
     guide = task["studyGuide"]
     if _guide_revision_token(guide) != str(previous.get("baseRevision") or ""):
-        raise ValueError("课程内容已发生变化，请重新发起小节修改")
+        raise RuntimeError("课程内容已发生变化，请重新发起小节修改")
 
     attempts = session.get("attempts") if isinstance(session.get("attempts"), list) else []
     conversation = [
@@ -1122,21 +1291,43 @@ def refine_global_course_feedback(
     return {"feedbackId": feedback_id, "status": "analyzed", "message": "已结合对话上下文更新当前小节修改预览。", "proposal": proposal}
 
 
-def apply_global_course_feedback(course_id: str, feedback_id: str) -> dict[str, Any]:
+@_locked_course_feedback
+def apply_global_course_feedback(course_id: str, feedback_id: str, *, remember_preference: bool = True) -> dict[str, Any]:
     from .study_service import _build_study_guide_sections, load_workspace, save_workspace
-    entries = _read_feedback_entries(course_id); feedback = _find_feedback(entries, feedback_id)
+
+    entries = _read_feedback_entries(course_id)
+    feedback = _find_feedback(entries, feedback_id)
     session = feedback.get("rewriteSession") if isinstance(feedback.get("rewriteSession"), dict) else {}
+    if feedback.get("status") == "accepted" and isinstance(session.get("acceptedGlobalRewrite"), dict):
+        return {"feedbackId": feedback_id, "workspace": load_workspace(course_id, refresh_materials=False), "status": "accepted", "idempotent": True, "message": "本次小节修改已应用。"}
+    if feedback.get("status") in {"abandoned", "expired"}:
+        raise ValueError("反馈会话已结束，不能应用")
     proposal = session.get("latestProposal") if isinstance(session.get("latestProposal"), dict) else None
-    if not proposal or not isinstance(proposal.get("revisedSection"), dict): raise ValueError("找不到可应用的小节修改方案")
-    task_id = str(proposal.get("taskId") or ""); workspace = load_workspace(course_id, refresh_materials=False)
+    if not proposal or not isinstance(proposal.get("revisedSection"), dict):
+        raise ValueError("找不到可应用的小节修改方案")
+    task_id = str(proposal.get("taskId") or "")
+    workspace = load_workspace(course_id, refresh_materials=False)
+    loaded_revision = int(workspace.get("revision", 0))
     task = next((item for item in workspace.get("tasks", []) if isinstance(item, dict) and str(item.get("id")) == task_id), None)
-    if not task or not isinstance(task.get("studyGuide"), dict): raise ValueError("当前课程讲义已不存在")
+    if not task or not isinstance(task.get("studyGuide"), dict):
+        raise ValueError("当前课程讲义已不存在")
     guide = task["studyGuide"]
-    if _guide_revision_token(guide) != str(proposal.get("baseRevision") or ""): raise ValueError("课程内容已发生变化，请重新生成小节修改方案")
+    if _guide_revision_token(guide) != str(proposal.get("baseRevision") or ""):
+        raise RuntimeError("课程内容已发生变化，请重新生成小节修改方案")
     _apply_revised_guide_section(guide, str(proposal.get("sectionId") or ""), int(proposal.get("sectionIndex") or 0), proposal["revisedSection"])
-    guide["sections"] = _build_study_guide_sections(guide); task["contentUpdatedAt"] = _now_iso(); save_workspace(workspace, course_id)
-    session["status"] = "accepted"; session["acceptedAt"] = _now_iso(); session["acceptedGlobalRewrite"] = {"operation": "revise_lesson_section", "anchor": "current_section", "taskId": task_id, "sectionId": proposal.get("sectionId"), "sectionIndex": proposal.get("sectionIndex"), "baseRevision": proposal.get("baseRevision"), "appliedRevision": _guide_revision_token(guide), "changeSummary": proposal.get("changeSummary"), "acceptedAt": _now_iso()}
+    guide["sections"] = _build_study_guide_sections(guide)
+    task["contentUpdatedAt"] = _now_iso()
+    save_workspace(workspace, course_id, expected_revision=loaded_revision)
+    accepted_at = _now_iso()
+    session["status"] = "accepted"
+    session["acceptedAt"] = accepted_at
+    session["acceptedGlobalRewrite"] = {"operation": "revise_lesson_section", "anchor": "current_section", "taskId": task_id, "sectionId": proposal.get("sectionId"), "sectionIndex": proposal.get("sectionIndex"), "baseRevision": proposal.get("baseRevision"), "appliedRevision": _guide_revision_token(guide), "changeSummary": proposal.get("changeSummary"), "acceptedAt": accepted_at}
     attempts = session.get("attempts") if isinstance(session.get("attempts"), list) else []
-    if attempts: attempts[-1]["accepted"] = True
-    feedback["status"] = "accepted"; _write_feedback_entries(course_id, entries)
-    return {"feedbackId": feedback_id, "message": "已应用当前小节修改，并将确认记录返回优化库。", "workspace": workspace}
+    if attempts:
+        attempts[-1]["accepted"] = True
+    feedback["status"] = "accepted"
+    feedback["rememberPreference"] = remember_preference
+    _activate_feedback_preference(course_id, feedback, remember_preference)
+    _compact_feedback_session(feedback)
+    _write_feedback_entries(course_id, entries)
+    return {"feedbackId": feedback_id, "status": "accepted", "message": "已应用当前小节修改。" + ("课程偏好已启用。" if remember_preference else "本次未保存为课程偏好。"), "workspace": workspace}

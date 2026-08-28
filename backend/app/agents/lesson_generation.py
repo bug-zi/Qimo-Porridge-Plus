@@ -42,6 +42,8 @@ class LessonBuilder:
     ordered_lessons: list[dict[str, Any]]
     lesson_index_by_id: dict[str, int]
     check_cancelled: Callable[[], None]
+    publish_progress: Callable[[str, str, int], None] | None = None
+    scoped_model_json: Callable[[str, str], JsonModelCall] | None = None
     deps: LessonRuntimeDeps = LessonRuntimeDeps()
 
     def build(self, task: dict[str, Any]) -> tuple[str, dict[str, Any], list[dict[str, Any]], ReviewReport, bool]:
@@ -144,7 +146,10 @@ class LessonBuilder:
         def generate_guide(review_issues: list[str] | None = None, attempt: int = 1) -> tuple[dict[str, Any], list[str]]:
             payload = lesson_input if not review_issues else {**lesson_input, "reviewIssues": review_issues}
             prompt = LESSON_CONTENT_PROMPT if not review_issues else LESSON_CONTENT_PROMPT + "\n请修复 reviewIssues 中的全部问题。"
-            result = self.model_json(prompt, json.dumps(payload, ensure_ascii=False), self.course_prompt)
+            if self.publish_progress:
+                self.publish_progress("lesson_guide", task_id, attempt)
+            model_json = self.scoped_model_json("lesson_guide", task_id) if self.scoped_model_json else self.model_json
+            result = model_json(prompt, json.dumps(payload, ensure_ascii=False), self.course_prompt)
             self.check_cancelled()
             guide = result.get("studyGuide") if isinstance(result.get("studyGuide"), dict) else {}
             issues = _study_guide_issues(
@@ -216,6 +221,7 @@ class LessonBuilder:
         )
         
         def generate_questions(review_issues: list[str] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+            stage_attempt = 2 if review_issues else 1
             practice_input = {
                 "task": task,
                 "examPoints": guide.get("examPoints", []),
@@ -224,7 +230,10 @@ class LessonBuilder:
             if review_issues:
                 practice_input["reviewIssues"] = review_issues
             prompt = LESSON_PRACTICE_PROMPT if not review_issues else LESSON_PRACTICE_PROMPT + "\n请修复 reviewIssues 中的全部问题。"
-            result = self.model_json(prompt, json.dumps(practice_input, ensure_ascii=False), self.course_prompt)
+            if self.publish_progress:
+                self.publish_progress("lesson_questions", task_id, stage_attempt)
+            model_json = self.scoped_model_json("lesson_questions", task_id) if self.scoped_model_json else self.model_json
+            result = model_json(prompt, json.dumps(practice_input, ensure_ascii=False), self.course_prompt)
             self.check_cancelled()
             questions = result.get("practiceQuestions") if isinstance(result.get("practiceQuestions"), list) else []
             questions = normalize_practice_questions(questions, guide)

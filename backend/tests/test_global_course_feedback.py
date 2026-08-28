@@ -59,7 +59,7 @@ def test_apply_subsection_preserves_other_three_sections(monkeypatch) -> None:
     proposal = {"taskId": "task-1", "sectionId": "method", "sectionIndex": 1, "baseRevision": service._guide_revision_token(original), "revisedSection": revised, "changeSummary": "追加总结"}
     entries = [{"id": "feedback-1", "rewriteSession": {"latestProposal": proposal, "attempts": [{"accepted": False}]}}]; saved = {}
     monkeypatch.setattr(service, "_read_feedback_entries", lambda _id: entries); monkeypatch.setattr(service, "_write_feedback_entries", lambda *_args: None)
-    monkeypatch.setattr("app.study_service.load_workspace", lambda *_args, **_kwargs: deepcopy(workspace)); monkeypatch.setattr("app.study_service.save_workspace", lambda value, _id: saved.update(deepcopy(value)))
+    monkeypatch.setattr("app.study_service.load_workspace", lambda *_args, **_kwargs: deepcopy(workspace)); monkeypatch.setattr("app.study_service.save_workspace", lambda value, _id, expected_revision=None: saved.update(deepcopy(value)))
     service.apply_global_course_feedback("course-1", "feedback-1")
     guide = saved["tasks"][0]["studyGuide"]
     assert guide["sections"][0] == original["sections"][0]
@@ -73,7 +73,7 @@ def test_apply_subsection_rejects_stale_course(monkeypatch) -> None:
     workspace = _workspace(); proposal = {"taskId": "task-1", "sectionId": "method", "sectionIndex": 1, "baseRevision": "stale", "revisedSection": {"id": "method"}}
     monkeypatch.setattr(service, "_read_feedback_entries", lambda _id: [{"id": "f", "rewriteSession": {"latestProposal": proposal}}]); monkeypatch.setattr("app.study_service.load_workspace", lambda *_args, **_kwargs: deepcopy(workspace))
     try: service.apply_global_course_feedback("c", "f")
-    except ValueError as error: assert "已发生变化" in str(error)
+    except RuntimeError as error: assert "已发生变化" in str(error)
     else: raise AssertionError("stale proposal should fail")
 
 def test_refine_subsection_keeps_session_and_previous_candidate(monkeypatch) -> None:

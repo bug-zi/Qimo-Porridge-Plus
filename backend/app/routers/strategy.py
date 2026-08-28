@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from ..agent_runtime import enqueue_agent_job, get_active_agent_job
+from ..agent_runtime import enqueue_agent_job, get_agent_job, get_latest_agent_job
 from ..agents.tools import apply_proposal, dismiss_proposal
 from ..study_service import (
     approve_strategy_documents,
@@ -126,7 +126,8 @@ def get_active_course_strategy_job(
     course_id: str,
     _owner_id: str = Depends(require_course_ownership),
 ) -> dict[str, Any]:
-    job = get_active_agent_job(course_id, "approve_strategy_documents")
+    # 终态也返回：刷新后仍能恢复刚完成/失败/取消的可信摘要。
+    job = get_latest_agent_job(course_id, "approve_strategy_documents")
     return {"job": job}
 
 
@@ -152,7 +153,7 @@ def enqueue_course_strategy_approval(
             },
             max_attempts=1,
         )
-        return {"jobId": job_id, "courseId": course_id}
+        return {"jobId": job_id, "courseId": course_id, "job": get_agent_job(job_id)}
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 

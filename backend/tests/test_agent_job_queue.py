@@ -41,6 +41,19 @@ def test_generation_job_bypasses_maintenance_backlog(monkeypatch, tmp_path):
     assert claimed["id"] != maintenance
 
 
+def test_latest_job_remains_recoverable_after_terminal_state(monkeypatch, tmp_path):
+    _use_temp_database(monkeypatch, tmp_path)
+    job_id = agent_runtime.enqueue_agent_job("course-1", "approve_strategy_documents", {})
+    claimed = agent_runtime._claim_job()
+    assert claimed and claimed["id"] == job_id
+    agent_runtime._complete_job(job_id, {"contentComplete": True}, lease_token=claimed["leaseToken"])
+
+    assert agent_runtime.get_active_agent_job("course-1", "approve_strategy_documents") is None
+    latest = agent_runtime.get_latest_agent_job("course-1", "approve_strategy_documents")
+    assert latest and latest["status"] == "completed"
+    assert latest["result"]["contentComplete"] is True
+
+
 def test_cancelled_job_stays_cancelled_after_worker_returns(monkeypatch, tmp_path):
     _use_temp_database(monkeypatch, tmp_path)
     job_id = agent_runtime.enqueue_agent_job("course-1", "approve_strategy_documents", {})
@@ -170,3 +183,61 @@ def test_heartbeat_survives_single_db_failure(monkeypatch, tmp_path):
     heartbeat.join(timeout=3)
     assert heartbeat.is_alive() is False  # 线程正常退出而非崩溃
     assert failures["count"] == 1  # 遭遇失败后线程仍活着并完成后续轮次
+
+def test_job_progress_is_persisted_and_stale_generation_is_fenced(monkeypatch, tmp_path):
+    database = _use_temp_database(monkeypatch, tmp_path)
+    job_id = agent_runtime.enqueue_agent_job(
+        "course-1", "approve_strategy_documents", {}, max_attempts=1
+    )
+    first = agent_runtime._claim_job()
+    assert first and first["id"] == job_id
+
+    assert agent_runtime.update_agent_job_progress(
+        job_id,
+        {"stage": "lesson_guide", "taskId": "task-1", "stageAttempt": 1},
+        lease_token=first["leaseToken"],
+    ) is True
+    progress = agent_runtime.get_agent_job(job_id)["progress"]
+    assert progress["stage"] == "lesson_guide"
+    assert progress["taskId"] == "task-1"
+    assert progress["stageAttempt"] == 1
+    assert progress["updatedAt"]
+
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE agent_jobs SET lease_until = '2000-01-01T00:00:00' WHERE id = ?",
+            (job_id,),
+        )
+        connection.commit()
+    second = agent_runtime._claim_job()
+    assert second and second["leaseToken"] != first["leaseToken"]
+    assert agent_runtime.update_agent_job_progress(
+        job_id,
+        {"stage": "lesson_questions", "taskId": "task-1", "stageAttempt": 1},
+        lease_token=first["leaseToken"],
+    ) is False
+    assert agent_runtime.get_agent_job(job_id)["progress"]["stage"] == "lesson_guide"
+
+
+def test_existing_agent_job_database_adds_progress_column(monkeypatch, tmp_path):
+    database = tmp_path / "legacy-agent.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE agent_jobs (
+                id TEXT PRIMARY KEY, course_id TEXT NOT NULL, job_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL DEFAULT 3,
+                available_at TEXT NOT NULL, lease_until TEXT NOT NULL DEFAULT '',
+                error TEXT NOT NULL DEFAULT '', result_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            )
+            """
+        )
+    monkeypatch.setattr(agent_runtime, "DATABASE_PATH", database)
+
+    agent_runtime.initialize_agent_database()
+
+    with sqlite3.connect(database) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(agent_jobs)")}
+    assert "progress_json" in columns

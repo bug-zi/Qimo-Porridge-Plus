@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import json
@@ -20,7 +20,7 @@ from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 from zipfile import ZipFile
 
-from .agent_runtime import AgentJobCancelled, create_adjustment_proposal, enqueue_agent_job, has_agent_job_ownership, is_agent_job_cancelled
+from .agent_runtime import AgentJobCancelled, create_adjustment_proposal, enqueue_agent_job, has_agent_job_ownership, is_agent_job_cancelled, update_agent_job_progress
 from .model_usage import model_call_scope, record_call_result, record_call_start
 from .agents import ORIENTATION_TASK_ID, build_orientation_guide, run_content_workflow, run_strategy_workflow, with_structured_formula_rules
 from .agents.answer_consistency import reconcile_question_answer
@@ -969,6 +969,20 @@ def approve_strategy_documents(
             workspace = load_workspace(course_id, refresh_materials=False)
         materials = scan_course_materials(course_id)
         try:
+            def publish_job_progress(stage: str, task_id: str = "", stage_attempt: int = 0) -> None:
+                if not job_id:
+                    return
+                try:
+                    update_agent_job_progress(
+                        job_id,
+                        {"stage": stage, "taskId": task_id, "stageAttempt": stage_attempt},
+                        lease_token=lease_token,
+                    )
+                except sqlite3.Error:
+                    # 可观察性写入失败不能反向中断课程生成；下一次阶段或 lease 心跳仍会更新。
+                    pass
+
+            publish_job_progress("preparing")
             sync_course_knowledge(course_id, workspace)
             retrieval = retrieve_material_context(
                 course_id,
@@ -977,6 +991,10 @@ def approve_strategy_documents(
             )
             evidence_context = retrieval.get("context", "") or _source_context(materials, course_id)
             def publish_content_progress(update: dict[str, Any]) -> None:
+                if job_id and (is_agent_job_cancelled(job_id) or (
+                    lease_token and not has_agent_job_ownership(job_id, lease_token)
+                )):
+                    raise AgentJobCancelled("课程生成任务已停止或失去执行权")
                 stage = update.get("stage")
                 if stage == "content_plan" and isinstance(update.get("candidate"), dict):
                     _write_content_plan_preview(course_id, update["candidate"], workspace, str(update.get("runId", "")))
@@ -1011,7 +1029,13 @@ def approve_strategy_documents(
                     else None
                 ),
                 telemetry_job_id=job_id,
+                publish_job_progress=publish_job_progress,
             )
+            if job_id and (is_agent_job_cancelled(job_id) or (
+                lease_token and not has_agent_job_ownership(job_id, lease_token)
+            )):
+                raise AgentJobCancelled("课程生成任务已停止或失去执行权")
+            publish_job_progress("finalizing")
             if repair_only or continue_generation:
                 # Incremental generation can run while the learner keeps studying.
                 # Merge into the newest persisted workspace so progress recorded

@@ -11358,6 +11358,26 @@ code .formula-symbol sup {
   background: rgba(40, 200, 255, 0.12);
 }
 
+
+.course-feedback-message.is-partial-success { color: #b56a18; }
+.course-feedback-remember { display:flex; align-items:flex-start; gap:10px; margin-top:16px; padding:13px 15px; border:1px solid rgba(255,110,155,.2); border-radius:14px; background:rgba(255,255,255,.4); cursor:pointer; }
+.course-feedback-remember input { margin-top:4px; }
+.course-feedback-remember span { display:grid; gap:3px; }
+.course-feedback-remember small { color:var(--text-muted); font-weight:400; }
+.course-feedback-dialog .primary-button { display:inline-flex; align-items:center; gap:6px; }
+.course-preferences-panel { margin-bottom:22px; }
+.course-preferences-panel .settings-panel-heading { display:flex; align-items:center; justify-content:space-between; gap:18px; }
+.preference-filter { display:flex; gap:8px; margin:16px 0; flex-wrap:wrap; }
+.preference-filter button { border:1px solid var(--border); border-radius:999px; padding:7px 12px; color:var(--text-muted); background:var(--surface-soft); cursor:pointer; }
+.preference-filter button.is-active { color:var(--accent-strong); border-color:var(--accent); background:var(--accent-soft); }
+.preference-list { display:grid; gap:10px; }
+.preference-list article { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:14px; border:1px solid var(--border); border-radius:14px; }
+.preference-list article p { margin:5px 0; color:var(--text-secondary); }
+.preference-list article small { color:var(--text-muted); }
+.preference-list article > div:last-child { display:flex; gap:8px; flex-shrink:0; }
+.secondary-button.is-danger { color:#b3485b; }
+@media (max-width:720px) { .preference-list article { align-items:flex-start; flex-direction:column; } }
+
 /* === 点击摘录高光弹出的「移出笔记」确认浮条 === */
 /* 与 selection-to-note-toolbar 同视觉体系；destructive 动作用红调渐变区分 */
 .note-dismiss-popover {
@@ -12761,4 +12781,36 @@ code .formula-symbol sup {
 
 .course-archive-confirm {
   background: var(--icon-fill);
+}
+
+.course-generation-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: start;
+  padding: 18px;
+  border: 1px solid var(--border-color, #d9e2ec);
+  border-radius: 16px;
+  background: var(--card-bg, #fff);
+}
+.course-generation-card.sync-degraded,
+.course-generation-card.sync-offline { border-color: #e6a23c; }
+.course-generation-card.is-failed { border-color: #e45b5b; }
+.course-generation-card-icon { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 12px; background: #edf5ff; color: #2775d7; }
+.course-generation-card-icon.health-delayed,
+.course-generation-card-icon.health-stale { background: #fff3d6; color: #a96700; }
+.course-generation-card-body { min-width: 0; }
+.course-generation-card-body > strong { display: block; margin-bottom: 9px; font-size: 1rem; }
+.course-generation-metrics { display: flex; flex-wrap: wrap; gap: 7px; }
+.course-generation-metrics span { padding: 4px 8px; border-radius: 999px; background: var(--soft-bg, #f3f6f9); font-size: .78rem; color: var(--muted-text, #5f6b78); }
+.course-generation-note,
+.course-generation-warning,
+.course-generation-error { margin: 9px 0 0; font-size: .84rem; line-height: 1.55; }
+.course-generation-warning { color: #9a6200; }
+.course-generation-error { color: #bd3030; }
+.course-generation-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+.course-generation-failed-badge { display: inline-flex; align-items: center; gap: 5px; color: #bd3030; font-size: .8rem; }
+@media (max-width: 820px) {
+  .course-generation-card { grid-template-columns: auto 1fr; }
+  .course-generation-actions { grid-column: 1 / -1; justify-content: flex-start; }
 }

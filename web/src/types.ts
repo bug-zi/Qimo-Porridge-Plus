@@ -98,11 +98,29 @@ export type CourseFeedbackRewriteProposal = {
 
 export type CourseFeedbackSubmitResult = {
   feedbackId: string
-  status: 'pending_analysis' | 'analyzed' | 'accepted' | string
+  status: 'pending_analysis' | 'analysis_failed' | 'awaiting_confirmation' | 'analyzed' | 'accepted' | 'abandoned' | string
   message: string
+  feedbackSaved?: boolean
+  analysisStatus?: string
+  proposalStatus?: string
+  canRetryProposal?: boolean
   rewriteProposal?: CourseFeedbackRewriteProposal
   rewriteError?: string
 }
+
+export type CourseFeedbackOpenSession = {
+  feedbackId: string
+  status: string
+  selectedText: string
+  userComment?: string
+  context: CourseFeedbackContext
+  rewriteProposal?: CourseFeedbackRewriteProposal
+  rewriteError?: string
+}
+
+export type CourseFeedbackOpenSessions = { items: CourseFeedbackOpenSession[] }
+export type CourseFeedbackActionResult = { feedbackId: string; status: string; message?: string; rewriteProposal?: CourseFeedbackRewriteProposal; rewriteError?: string }
+export type CourseFeedbackApplyOptions = { rememberPreference: boolean; expectedRevision?: number }
 
 export type CourseFeedbackRefineResult = {
   feedbackId: string
@@ -113,6 +131,9 @@ export type CourseFeedbackApplyResult = {
   feedbackId: string
   message: string
   workspace: StudyWorkspace
+  status?: 'accepted' | string
+  idempotent?: boolean
+  rememberPreference?: boolean
 }
 
 export type GlobalCourseFeedbackProposal = {
@@ -153,8 +174,12 @@ export type CourseFeedbackRules = {
   version: number
   rules: CourseFeedbackRule[]
   summaryPrompt: string
+  strongDirectives?: Array<{ id: string; status: string; instruction: string; sourceFeedbackId?: string }>
   updatedAt: string
 }
+
+export type CourseFeedbackRuleAction = 'activate' | 'deactivate' | 'delete'
+export type CourseFeedbackRuleActionResult = { message: string; rules: CourseFeedbackRules }
 
 export type AccountProfile = {
   id: string
@@ -622,6 +647,38 @@ export type StrategyRevisionStreamDone = {
   coursePrompt: string
 }
 
+export type AgentJobProgress = {
+  stage?: 'preparing' | 'lesson_guide' | 'lesson_questions' | 'finalizing' | string
+  taskId?: string | null
+  stageAttempt?: number
+  message?: string
+  updatedAt?: string
+}
+
+export type ModelUsageCall = {
+  model: string
+  startedAt: string
+  stage?: string
+  taskId?: string
+  attempt?: number
+}
+
+export type ModelUsageTotals = {
+  calls: number
+  failures: number
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+}
+
+export type ModelUsageSnapshot = ModelUsageTotals & {
+  startedAt?: string
+  updatedAt?: string
+  currentCall?: ModelUsageCall | null
+  stages?: Record<string, ModelUsageTotals>
+  recent?: Array<ModelUsageTotals & { at: string; model: string; stage?: string; taskId?: string; attempt?: number; error?: string }>
+}
+
 export type AgentJob = {
   id: string
   courseId: string
@@ -631,9 +688,22 @@ export type AgentJob = {
   maxAttempts: number
   error: string
   result: Record<string, unknown>
-  modelUsage?: { calls: number; failures: number; promptTokens: number; completionTokens: number; totalTokens: number; currentCall: { model: string; startedAt: string; stage?: string; taskId?: string; attempt?: number }; stages?: Record<string, { calls: number; failures: number; promptTokens: number; completionTokens: number; totalTokens: number }> } | null
+  progress?: AgentJobProgress | null
+  modelUsage?: ModelUsageSnapshot | null
   createdAt: string
   updatedAt: string
+}
+
+export type StrategyGenerationSession = {
+  courseId: string
+  job: AgentJob
+  source: 'submitted' | 'recovered'
+  syncStatus: 'syncing' | 'healthy' | 'degraded' | 'offline'
+  consecutiveSyncFailures: number
+  lastSyncedAt: string | null
+  syncError: string
+  workspaceRefreshError: string
+  stopRequested: boolean
 }
 
 export type KnowledgePoint = {

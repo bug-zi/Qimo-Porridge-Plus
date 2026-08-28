@@ -7,9 +7,13 @@ import type {
   BilibiliCredentialStatus,
   BilibiliCredentialVerifyResult,
   Course,
+  CourseFeedbackActionResult,
   CourseFeedbackApplyResult,
+  CourseFeedbackOpenSessions,
   CourseFeedbackRefineResult,
   CourseFeedbackRequest,
+  CourseFeedbackRuleAction,
+  CourseFeedbackRuleActionResult,
   CourseFeedbackRules,
   CourseFeedbackSubmitResult,
   GlobalCourseFeedbackResult,
@@ -315,11 +319,11 @@ export function approveStrategyDocuments(
   })
 }
 
-export function approveStrategyDocumentsInBackground(
+export async function approveStrategyDocumentsInBackground(
   courseId: string,
   payload: StrategyGenerationRequest,
 ) {
-  return request<{ jobId: string; courseId: string }>(`/courses/${encodeURIComponent(courseId)}/strategy-documents/approve-job`, {
+  const queued = await request<{ jobId: string; courseId: string; job?: AgentJob }>(`/courses/${encodeURIComponent(courseId)}/strategy-documents/approve-job`, {
     method: 'POST',
     body: JSON.stringify({
       review_plan: payload.reviewPlan,
@@ -332,6 +336,11 @@ export function approveStrategyDocumentsInBackground(
       continue_generation: payload.continueGeneration ?? false,
     }),
   })
+  return { ...queued, job: queued.job ?? await getAgentJob(queued.jobId) }
+}
+
+export function getActiveStrategyGenerationJob(courseId: string) {
+  return request<{ job: AgentJob | null }>(`/courses/${encodeURIComponent(courseId)}/strategy-documents/active-job`)
 }
 
 export function getAgentJob(jobId: string) {
@@ -374,14 +383,45 @@ export function refineGlobalCourseFeedback(courseId: string, feedbackId: string,
   }, 180000)
 }
 
-export function applyGlobalCourseFeedback(courseId: string, feedbackId: string) {
+export function applyGlobalCourseFeedback(courseId: string, feedbackId: string, rememberPreference = true) {
   return request<CourseFeedbackApplyResult>(`/courses/${encodeURIComponent(courseId)}/course-feedback/${encodeURIComponent(feedbackId)}/global/apply`, {
     method: 'POST',
+    body: JSON.stringify({ remember_preference: rememberPreference }),
   }, 120000)
 }
 
 export function getCourseFeedbackRules(courseId: string) {
   return request<CourseFeedbackRules>(`/courses/${encodeURIComponent(courseId)}/course-feedback/rules`)
+}
+
+export function getCourseFeedbackItems(courseId: string) {
+  return request<CourseFeedbackOpenSessions & { feedback?: CourseFeedbackOpenSessions['items'] }>(`/courses/${encodeURIComponent(courseId)}/course-feedback`)
+}
+
+export function getOpenCourseFeedback(courseId: string) {
+  return request<CourseFeedbackOpenSessions>(`/courses/${encodeURIComponent(courseId)}/course-feedback/open`)
+}
+
+export function retryCourseFeedbackProposal(courseId: string, feedbackId: string) {
+  return request<CourseFeedbackActionResult>(`/courses/${encodeURIComponent(courseId)}/course-feedback/${encodeURIComponent(feedbackId)}/proposal/retry`, { method: 'POST' }, 120000)
+}
+
+export function abandonCourseFeedback(courseId: string, feedbackId: string) {
+  return request<CourseFeedbackActionResult>(`/courses/${encodeURIComponent(courseId)}/course-feedback/${encodeURIComponent(feedbackId)}/abandon`, { method: 'POST' })
+}
+
+export function mergeCourseFeedbackRules(courseId: string, targetRuleId: string, sourceRuleIds: string[]) {
+  return request<{ targetRuleId: string; mergedRuleIds: string[]; rules: CourseFeedbackRules }>(`/courses/${encodeURIComponent(courseId)}/course-feedback/rules/merge`, {
+    method: 'POST',
+    body: JSON.stringify({ target_rule_id: targetRuleId, source_rule_ids: sourceRuleIds }),
+  })
+}
+
+export function updateCourseFeedbackRule(courseId: string, ruleId: string, action: CourseFeedbackRuleAction) {
+  return request<CourseFeedbackRuleActionResult>(`/courses/${encodeURIComponent(courseId)}/course-feedback/rules/${encodeURIComponent(ruleId)}`, {
+    method: action === 'delete' ? 'DELETE' : 'PATCH',
+    body: action === 'delete' ? undefined : JSON.stringify({ status: action === 'activate' ? 'active' : 'inactive' }),
+  })
 }
 
 export function refineCourseFeedbackRewrite(courseId: string, feedbackId: string, extraComment: string, previousRewrite: string) {
@@ -391,10 +431,11 @@ export function refineCourseFeedbackRewrite(courseId: string, feedbackId: string
   }, 120000)
 }
 
-export function applyCourseFeedbackRewrite(courseId: string, feedbackId: string, originalText: string, rewrittenText: string, target: CourseFeedbackRequest['context']) {
+export function applyCourseFeedbackRewrite(courseId: string, feedbackId: string, rememberPreference = true, expectedRevision?: number) {
   return request<CourseFeedbackApplyResult>(`/courses/${encodeURIComponent(courseId)}/course-feedback/${encodeURIComponent(feedbackId)}/rewrite/apply`, {
     method: 'POST',
-    body: JSON.stringify({ original_text: originalText, rewritten_text: rewrittenText, target: target ?? {} }),
+    // The server applies its own latest proposal. Only the optimistic workspace revision crosses the boundary.
+    body: JSON.stringify({ remember_preference: rememberPreference, expected_revision: expectedRevision }),
   }, 120000)
 }
 

@@ -98,6 +98,7 @@ def initialize_agent_database() -> None:
                 lease_until TEXT NOT NULL DEFAULT '',
                 error TEXT NOT NULL DEFAULT '',
                 result_json TEXT NOT NULL DEFAULT '{}',
+                progress_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -241,6 +242,10 @@ def initialize_agent_database() -> None:
         if "lease_token" not in existing_job_columns:
             connection.execute(
                 "ALTER TABLE agent_jobs ADD COLUMN lease_token TEXT NOT NULL DEFAULT ''"
+            )
+        if "progress_json" not in existing_job_columns:
+            connection.execute(
+                "ALTER TABLE agent_jobs ADD COLUMN progress_json TEXT NOT NULL DEFAULT '{}'"
             )
 
         # adjustment_proposals 表：为「按新参数重新编排」类提案追加 params_json 列，
@@ -438,12 +443,24 @@ def enqueue_agent_job(
 
 
 def get_active_agent_job(course_id: str, job_type: str) -> dict[str, Any] | None:
-    """Return the newest active job so a refreshed client can resume polling it."""
+    """Return the newest active job for queue deduplication and worker coordination."""
     initialize_agent_database()
     with _connection() as connection:
         row = connection.execute(
             "SELECT id FROM agent_jobs WHERE course_id = ? AND job_type = ? "
             "AND status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1",
+            (course_id, job_type),
+        ).fetchone()
+    return get_agent_job(str(row["id"])) if row is not None else None
+
+
+def get_latest_agent_job(course_id: str, job_type: str) -> dict[str, Any] | None:
+    """Return the latest job, including its terminal summary, for refreshed clients."""
+    initialize_agent_database()
+    with _connection() as connection:
+        row = connection.execute(
+            "SELECT id FROM agent_jobs WHERE course_id = ? AND job_type = ? "
+            "ORDER BY created_at DESC LIMIT 1",
             (course_id, job_type),
         ).fetchone()
     return get_agent_job(str(row["id"])) if row is not None else None
@@ -463,6 +480,39 @@ def cancel_agent_job(job_id: str) -> dict[str, Any]:
                 (timestamp, job_id),
             )
     return get_agent_job(job_id)
+
+
+def update_agent_job_progress(
+    job_id: str,
+    progress: dict[str, Any],
+    *,
+    lease_token: str = "",
+) -> bool:
+    """Persist user-visible progress, fenced to the current running generation."""
+    if not job_id:
+        return False
+    timestamp = _now()
+    normalized = {
+        "stage": str(progress.get("stage", "")),
+        "taskId": str(progress.get("taskId", "")),
+        "stageAttempt": max(0, int(progress.get("stageAttempt", 0) or 0)),
+        "message": str(progress.get("message", "")),
+        "updatedAt": timestamp,
+    }
+    with _connection() as connection:
+        if lease_token:
+            changed = connection.execute(
+                "UPDATE agent_jobs SET progress_json = ?, updated_at = ? "
+                "WHERE id = ? AND status = 'running' AND lease_token = ?",
+                (json.dumps(normalized, ensure_ascii=False), timestamp, job_id, lease_token),
+            ).rowcount
+        else:
+            changed = connection.execute(
+                "UPDATE agent_jobs SET progress_json = ?, updated_at = ? "
+                "WHERE id = ? AND status = 'running'",
+                (json.dumps(normalized, ensure_ascii=False), timestamp, job_id),
+            ).rowcount
+    return bool(changed)
 
 
 def is_agent_job_cancelled(job_id: str) -> bool:
@@ -502,6 +552,7 @@ def get_agent_job(job_id: str) -> dict[str, Any]:
         "maxAttempts": int(row["max_attempts"]),
         "error": str(row["error"]),
         "result": json.loads(row["result_json"]),
+        "progress": json.loads(row["progress_json"] or "{}"),
         "modelUsage": get_scoped_model_usage(str(row["id"])),
         "createdAt": str(row["created_at"]),
         "updatedAt": str(row["updated_at"]),

@@ -32,7 +32,7 @@ type AiCompanionProps = {
   activeStudySection: { index: number; id: string; label: string; title: string } | null
   onSubmitGlobalCourseFeedback: (taskId: string, sectionId: string, sectionIndex: number, userComment: string) => Promise<GlobalCourseFeedbackResult>
   onRefineGlobalCourseFeedback: (feedbackId: string, extraComment: string) => Promise<GlobalCourseFeedbackResult>
-  onApplyGlobalCourseFeedback: (feedbackId: string) => Promise<string | void>
+  onApplyGlobalCourseFeedback: (feedbackId: string, rememberPreference?: boolean) => Promise<string | void>
   onNoteChange: (note: string) => void
   streamingMessage?: StreamingMessage | null
   strategyReviewActive?: boolean
@@ -223,6 +223,7 @@ export function AiCompanion({
   const [globalResult, setGlobalResult] = useState<GlobalCourseFeedbackResult | null>(null)
   const [globalStatus, setGlobalStatus] = useState<'idle' | 'generating' | 'preview' | 'applying' | 'applied' | 'error'>('idle')
   const [globalMessage, setGlobalMessage] = useState('')
+  const [globalRememberPreference, setGlobalRememberPreference] = useState(true)
   const [globalConversation, setGlobalConversation] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([])
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
@@ -430,7 +431,7 @@ export function AiCompanion({
     if (!globalResult) return
     setGlobalStatus('applying')
     try {
-      const message = await onApplyGlobalCourseFeedback(globalResult.feedbackId)
+      const message = await onApplyGlobalCourseFeedback(globalResult.feedbackId, globalRememberPreference)
       setGlobalStatus('applied')
       setGlobalMessage(message || '已应用当前小节修改。')
     } catch (error) {
@@ -661,6 +662,10 @@ export function AiCompanion({
                             <p>{globalResult.proposal.changeSummary}</p>
                             {globalResult.proposal.rationale && <small>{globalResult.proposal.rationale}</small>}
                             <div className="proposal-actions">
+                              <label className="course-feedback-remember">
+                                <input type="checkbox" checked={globalRememberPreference} onChange={(event) => setGlobalRememberPreference(event.target.checked)} />
+                                <span><strong>记住这个偏好</strong><small>取消勾选则只修改本次小节。</small></span>
+                              </label>
                               <button type="button" className="primary-button" onClick={() => void applyGlobalRevision()} disabled={globalStatus === 'applying'}>
                                 {globalStatus === 'applying' ? '应用中...' : '确认应用小节修改'}
                               </button>
