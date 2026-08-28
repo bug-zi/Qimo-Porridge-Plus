@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import knowledge_service, ocr_service, study_service
+from app import knowledge_service, material_parser, ocr_service, study_service
 
 
 def test_pdf_page_limit_defaults_to_complete_document() -> None:
@@ -28,14 +28,15 @@ def test_sparse_pdf_text_layer_triggers_ocr(monkeypatch, tmp_path: Path) -> None
     document.save(str(pdf_path))
     document.close()
 
-    monkeypatch.setattr(study_service, "_extract_with_markitdown", lambda _path: ("watermark", ""))
+    # 解析器实现已搬到 material_parser.py（阶段2-2），打桩 patch 本体模块。
+    monkeypatch.setattr(material_parser, "_extract_with_markitdown", lambda _path: ("watermark", ""))
     monkeypatch.setattr(
-        study_service,
+        material_parser,
         "_ocr_fallback_for_scanned_pdf",
         lambda _path: ("完整正文" * 300, "RapidOCR 本地 OCR（5 页）", []),
     )
 
-    parsed = study_service._extract_material_content(pdf_path, force_reparse=True)
+    parsed = material_parser._extract_material_content(pdf_path, force_reparse=True)
     assert parsed["parser"] == "RapidOCR 本地 OCR（5 页）"
     assert parsed["parsedCharacters"] == len("完整正文" * 300)
 

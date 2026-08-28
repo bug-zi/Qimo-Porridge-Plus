@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import model_profiles, paths, study_service
+from app import material_parser, model_profiles, paths, study_service
 
 
 def test_paths_module_is_sole_owner_of_directory_constants() -> None:
@@ -75,3 +75,48 @@ def test_build_model_messages_is_injected_into_model_client() -> None:
     from app import model_client
 
     assert model_client._MESSAGE_BUILDER is model_profiles.build_model_messages
+
+
+def test_study_service_facade_reexports_material_parser_domain() -> None:
+    """资料解析域符号必须继续可从 study_service 导入且为同一对象。"""
+    facade_symbols = [
+        "MATERIAL_ANALYSIS_VERSION",
+        "TEXT_SUFFIXES",
+        "IMAGE_SUFFIXES",
+        "MARKITDOWN_SUFFIXES",
+        "DOCLING_SUFFIXES",
+        "OFFICE_TO_PDF_SUFFIXES",
+        "XLSX_PREVIEW_MAX_ROWS",
+        "XLSX_PREVIEW_MAX_COLUMNS",
+        "SPREADSHEET_NAMESPACE",
+        "_convert_file_to_pdf",
+        "_extract_image_with_vision",
+        "_extract_material_content",
+        "_extract_native_xlsx",
+        "_extract_pptx_excerpt",
+        "_extract_with_docling",
+        "_extract_with_markitdown",
+        "_extract_xlsx_preview",
+        "_load_cached_parse",
+        "_material_cache_key",
+        "_material_cache_path",
+        "_normalize_extracted_text",
+        "_ocr_fallback_for_scanned_pdf",
+        "_relative_material_path",
+        "_save_cached_parse",
+        "_sheets_to_markdown",
+        "analyze_course_material",
+        "build_material_preview",
+        "resolve_converted_material_pdf_path",
+        "resolve_course_material_path",
+    ]
+    for name in facade_symbols:
+        assert hasattr(study_service, name), f"门面缺失符号: {name}"
+        assert getattr(study_service, name) is getattr(material_parser, name), (
+            f"{name} 不是 material_parser 本体的同一对象（re-export 被副本覆盖）"
+        )
+
+
+def test_material_parser_module_does_not_import_study_service() -> None:
+    """依赖方向约束：material_parser 模块级不依赖 study_service（环检查）。"""
+    assert "study_service" not in getattr(material_parser, "__dict__", {})
