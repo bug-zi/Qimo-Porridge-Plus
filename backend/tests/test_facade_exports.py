@@ -156,3 +156,52 @@ def test_study_service_facade_reexports_materials_domain() -> None:
 def test_materials_module_does_not_import_study_service() -> None:
     """依赖方向约束：materials 模块级不依赖 study_service（环检查）。"""
     assert "study_service" not in getattr(materials, "__dict__", {})
+
+
+def test_study_service_facade_reexports_workspace_domain() -> None:
+    """工作空间域符号必须继续可从 study_service 导入且为同一对象。"""
+    from app import workspace
+
+    facade_symbols = [
+        "WORKSPACE_CONTENT_VERSION",
+        "_CONTENT_GENERATION_LOCKS",
+        "_CONTENT_GENERATION_LOCKS_GUARD",
+        "_WORKSPACE_LOCKS",
+        "_WORKSPACE_LOCKS_GUARD",
+        "_atomic_write_text",
+        "_build_study_guide_sections",
+        "_clear_pre_plan_content",
+        "_complete_study_guide",
+        "_content_generation_lock",
+        "_course_data_directory",
+        "_course_material_directory",
+        "_course_overview_path",
+        "_empty_course_workspace",
+        "_ensure_workspace_content_quality",
+        "_mind_map_path",
+        "_reshuffle_unanswered_single_choice",
+        "_review_days_from_exam_date",
+        "_strategy_directory",
+        "_validate_course_id",
+        "_workspace_is_planned",
+        "_workspace_lock",
+        "_workspace_path",
+        "create_course_workspace",
+        "create_empty_course_workspace",
+        "load_mind_map",
+        "load_workspace",
+        "save_mind_map",
+        "save_workspace",
+    ]
+    for name in facade_symbols:
+        assert hasattr(study_service, name), f"门面缺失符号: {name}"
+        assert getattr(study_service, name) is getattr(workspace, name), (
+            f"{name} 不是 workspace 本体的同一对象（re-export 被副本覆盖）"
+        )
+
+
+def test_workspace_module_does_not_import_study_service() -> None:
+    """依赖方向约束：workspace 模块级不依赖 study_service（环检查）。"""
+    from app import workspace
+
+    assert "study_service" not in getattr(workspace, "__dict__", {})
