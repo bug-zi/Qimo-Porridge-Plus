@@ -19,10 +19,10 @@
 |---|---|
 | 日期 | 2026-08-28 |
 | 分支 | dev |
-| 后端测试 | ✅ 138 passed / 96s（2026-08-28，含队列 fencing 新增 4 测试） |
-| 前端 tsc / build | ⚠️ 本轮未跑（本轮无前端代码改动） |
-| 工作区 | 用户调试脚本 inspect_*.py / run_one_lesson.py 未跟踪，归属待确认 |
-| 当前主线 | 阶段0止血 ✅ → 阶段1 AI工作流稳定性 ✅（真实上游已验证）→ 队列双重执行修复 ✅ → 阶段2 拆分 study_service |
+| 后端测试 | ✅ 151 passed / 96s（2026-08-28，阶段2-1~2-3 拆分后，含门面契约测试 ×8） |
+| 前端 tsc / build | ✅ `npx tsc -b`；⚠️ build 转换 2265 modules 后 exit 1（既有 Windows 原生构建问题） |
+| 工作区 | 阶段2-1~2-3 已提交；用户未提交改动仍在工作区（答案一致性 + 小节多轮对话代码，其看板条目已随 docs 提交入库） |
+| 当前主线 | 阶段0止血 ✅ → 阶段1 AI工作流稳定性 ✅ → 队列双重执行修复 ✅ → 阶段2 拆分 study_service（2-1~2-3 ✅，后续拆分待排期） |
 | 架构债提醒 | uvicorn --reload 在中文路径下失效（改代码不重启），修复需手动重启后端 |
 
 ---
@@ -50,9 +50,12 @@
 - [ ] 改善失败/部分成功/继续生成/取消/恢复的前端状态展示
 - [ ] 补本地首次安装、依赖检查、启动说明
 
-**阶段2（后端结构，阶段1完成后）**
+**阶段2（后端结构，2-1~2-3 已完成）**
 
-- [ ] 拆分 `study_service.py` → model_client / model_profiles / workspace 等模块（旧文件 re-export 门面；模型调用部分与阶段1流式改造合并做）
+- [x] 2-1 抽取 model_profiles.py（模型配置/用户画像）+ paths.py（路径常量收敛）+ 门面契约测试（167357e）
+- [x] 2-2 抽取 material_parser.py（资料解析域：MarkItDown/Docling/RapidOCR/视觉级联、转 PDF、XLSX、缓存）（c090366）
+- [x] 2-3 抽取 materials.py（资料管理域：扫描/上传/删除、主辅角色、资料记忆、知识库同步）（7024558）
+- [ ] 继续拆分 `study_service.py`（现 ~4130 行）：workspace 域（load/save/锁/课程信息）、练习/错题域、复习计划域等，旧文件 re-export 门面模式不变
 
 **阶段3（前端结构）**
 
@@ -66,6 +69,8 @@
 
 ## 🐛 Bug 跟踪
 
+- [x] 2026-08-28 关闭：[中] 侧边 AI 伴学“整体修改当前小节”生成一次预览后只能重填或应用，无法围绕候选版本继续多轮对话 ｜ 新增同一 feedback session 的 refine API、历史意见/上一版候选传递、对话式前端交互与回归测试
+- [x] 2026-08-28 关闭：[高] 自测答案配置与解析冲突仍按错误 answerIndex 判分；自测4应为20ms却判50ms ｜ 新增保守的解析结论一致性校验，覆盖摸底/练习/错题重做/模拟卷；已修复现有作答、错题记录、掌握度和学习事件
 - [ ] [中] Vite/Rolldown 生产构建在 Windows 转换 2265 modules 后原生退出 `0xC0000409`，无 JS 堆栈；tsc 正常 ｜ 已复现，待独立定位
 - [ ] [中] uvicorn `--reload` 在中文路径下不生效（改代码不重启进程），开发期修改后端代码可能跑的是旧代码 ｜ 2026-08-28 实测发现（03:07 改 agent_runtime.py 服务未重启）｜ 待定位：考虑 watchfiles 路径兼容或改用显式重启脚本
 - [ ] [低] `routers/__init__.py` 有 UTF-8 BOM，脚本读取需 `utf-8-sig` ｜ 待顺手清理
@@ -75,6 +80,9 @@
 
 ## ✅ 已完成（最近）
 
+- [x] 2026-08-28 阶段2-1~2-3 完成：study_service.py 5482→4132 行，拆出 model_profiles / material_parser / materials + paths.py 路径常量收敛；re-export 门面 + 门面契约测试 ×8 锁定；三个独立提交（167357e / c090366 / 7024558）
+- [x] 2026-08-28 完善“整体修改当前小节”多轮对话：可连续补充意见、保留历史要求并迭代候选预览，最终确认应用最新版本；切换小节自动重置会话
+- [x] 2026-08-28 修复自测答案配置冲突：解析明确“应选20毫秒”时自动纠正 answerIndex 后再判分；现有自测4数据已回正；新增 4 个回归测试
 - [x] 2026-08-28 修复 agent 队列双重执行（132e3e1）：现场实锤心跳猝死→lease 过期→二次 claim→同课程双份生成；fencing token + 心跳保护 + 同课程互斥三件套，138 passed
 - [x] 2026-08-28 阶段1 真实上游验证通过：课程 course-1787678599479 增量生成第 7 课 task-d7-03-file-operations（13060 字 guide），job completed，流式+首 token 超时在真实模型下工作正常
 - [x] 2026-08-28 阶段1 AI工作流稳定性改造完成（4 个提交）：model_client.py 抽取（b3c19e6）→ 流式+30s 首 token 超时（5fe4a13）→ job 级 2h 硬超时（c6c79cb）→ fake-provider 单测 ×7（317f71b）；全量 134 passed
@@ -87,6 +95,12 @@
 
 | 日期 | 内容 | 结果 |
 |---|---|---|
+| 2026-08-28 | 阶段2-3 后全量 pytest（materials 抽取后） | ✅ 151 passed / 96s |
+| 2026-08-28 | 阶段2-2 后全量 pytest（material_parser 抽取后） | ✅ 149 passed / 96s |
+| 2026-08-28 | 阶段2-1 后全量 pytest（model_profiles + paths 抽取后） | ✅ 147 passed / 96s |
+| 2026-08-28 | 小节整体修改多轮对话：后端全量 pytest / 前端 tsc / build | ✅ 143 passed / ✅ tsc / ⚠️ Vite 2265 modules 后既有原生 exit 1 |
+| 2026-08-28 | 后端全量 pytest（答案一致性修复，新增 ×4） | ✅ 142 passed / 100.19s |
+| 2026-08-28 | 前端 `npx tsc -b` / `npm run build`（本轮无前端改动） | ⚠️ 并行中的 `AiCompanion.tsx` 未使用变量 ×2；build 转换 2265 modules 后 exit 1 |
 | 2026-08-28 | 后端全量 pytest（队列 fencing 修复后，含新增 ×4） | ✅ 138 passed / 96s |
 | 2026-08-28 | 真实上游增量生成监控（job-0d929645，approve attempt 1→2 双执行现场） | ✅ completed；第 7 课产出 13060 字；bug 现场已捕获并修复 |
 | 2026-08-28 | 后端全量 pytest（阶段1完成后，含新增 test_model_client ×7） | ✅ 134 passed / 95.63s |
@@ -101,6 +115,9 @@
 
 | 日期 | commit | 说明 |
 |---|---|---|
+| 2026-08-28 | 7024558 | refactor(materials): 抽取资料管理域到 materials.py（阶段2-3） |
+| 2026-08-28 | c090366 | refactor(materials): 抽取资料解析域到 material_parser.py（阶段2-2） |
+| 2026-08-28 | 167357e | refactor(model): 抽取模型配置/用户画像到 model_profiles.py + paths.py（阶段2-1） |
 | 2026-08-28 | 132e3e1 | fix(queue): lease 代际 fencing + 心跳保护 + 同课程互斥，杜绝双重生成 |
 | 2026-08-28 | d3fdc3c | docs: 看板更新——阶段1 完成、134 passed、卡死/误杀两条 Bug 关闭 |
 | 2026-08-28 | 317f71b | test: fake-provider 单测锁定流式/超时/重试/failover（阶段1-4，7 个新测试） |
