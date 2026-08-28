@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import material_parser, materials, model_profiles, paths, practice, review_plan, study_service
+from app import agent_chat, material_parser, materials, model_profiles, paths, practice, review_plan, study_service
 
 
 def test_paths_module_is_sole_owner_of_directory_constants() -> None:
@@ -265,3 +265,29 @@ def test_study_service_facade_reexports_review_plan_domain() -> None:
 def test_review_plan_module_does_not_import_study_service() -> None:
     """依赖方向约束：review_plan 模块级不依赖 study_service（环检查）。"""
     assert "study_service" not in getattr(review_plan, "__dict__", {})
+
+
+def test_study_service_facade_reexports_agent_chat_domain() -> None:
+    """Agent 对话域符号必须继续可从 study_service 导入且为同一对象。"""
+    facade_symbols = [
+        "CONVERSATION_RECENT_TURNS",
+        "CONVERSATION_SUMMARY_BATCH",
+        "_agent_chat_legacy",
+        "_build_agent_messages",
+        "_maintain_rolling_summary",
+        "_sse",
+        "_summarize_chat_memories",
+        "_summarize_turn_batch",
+        "agent_chat",
+        "agent_chat_stream",
+    ]
+    for name in facade_symbols:
+        assert hasattr(study_service, name), f"门面缺失符号: {name}"
+        assert getattr(study_service, name) is getattr(agent_chat, name), (
+            f"{name} 不是 agent_chat 本体的同一对象（re-export 被副本覆盖）"
+        )
+
+
+def test_agent_chat_module_does_not_import_study_service() -> None:
+    """依赖方向约束：agent_chat 模块级不依赖 study_service（环检查）。"""
+    assert "study_service" not in getattr(agent_chat, "__dict__", {})
