@@ -17,9 +17,9 @@
 
 | 项 | 状态 |
 |---|---|
-| 日期 | 2026-08-28 |
+| 日期 | 2026-08-29 |
 | 分支 | dev |
-| 后端测试 | ✅ 173 passed / 122s（2026-08-28，反馈规则合并与生命周期补强后） |
+| 后端测试 | ✅ 187 passed / 97s（2026-08-29，自测初稿生成调用补回后） |
 | 前端 tsc / test / build | ✅ `npx tsc -b`；✅ Vitest 5 passed；⚠️ build 转换 2249 modules 后原生 exit 1（既有 Windows Vite/Rolldown 问题） |
 | 反馈后端路由验收 | ✅ 8000 OpenAPI 已确认 open/retry/abandon/rules merge/update/delete/global refine/apply 全部注册 |
 | 后续计划 | ✅ 已完成当前项目考核；新计划见 [1m`docs/后续项目考核与任务实施计划.md`[0m；旧反馈方案已归档删除 |
@@ -34,8 +34,12 @@
 - [x] 2026-08-28 设置页 API Key 显示优化：已保存密钥隐藏状态改为 `···`，移除“已保存到本机，留空继续使用”提示（主模型/备用模型）
 - [ ] 前端"生成用量基线"：`App.tsx` 已记录基线、`ModuleView.tsx` 已加 `generationUsageBaseline` 属性定义，但**属性未从 App 传给 ModuleView、未参与增量用量展示**，链路没串完（6c622dd 已提交一半改动，注意 types.ts 已有字段）
 - [ ] P1 验收：阶段1 流式改造需用真实上游验证（真实课程生成一轮，观察首 token 超时与 failover 是否按预期工作）
+- [ ] 修复多节生成取消后的已完成内容交付：后端已有逐节预览落盘，但需补强取消/终态结果与前端恢复展示，避免用户误以为已完成课程被吞掉（本轮已定位，待方案确认）
 
 ## 📋 计划中
+
+- [x] 课程排版保留审核、移除评分 ｜ 已完成：审核仍保留，移除单课/汇总 score 计算、返回与界面展示；复习主线审核状态卡片和审核按钮均已移除，后台审核接口保留；tsc 通过；build 仍复现既有 Windows 原生 exit 1
+- [ ] 课程初稿定向微调修复 ｜ 用户已批准；已接入讲义/自测 patch Prompt、定向合并器与失败 artifact；新增 `backend/tests/test_content_patches.py`；后端 pytest 183 passed；仍需补强 patch 字段契约与真实上游验收
 
 **P1（真实课程端到端验收，人工执行为主）**
 
@@ -81,6 +85,9 @@
 
 ## 🐛 Bug 跟踪
 
+- [ ] 2026-08-29 新增：[高] 无自测检查点时直接拿空初稿走 patch，补题不带 examPointIds 导致考点覆盖校验循环失败 ｜ 现象：task-d3-03"调度概念"课讲义成功但自测环节失败，前端永远"内容生成中"，面板只显示 2 次模型调用 ｜ 根因：定向微调重构把 `generate_questions()` 首次调用删丢，patch 的 add_question 不带 examPointIds 而覆盖校验只认该字段 ｜ 修复：补回初稿生成调用（方案阶段三步骤1）、恢复初稿一次通过时的 checkpoint 落盘、patch artifact 输入/剩余问题分离、patch Prompt 明确要求 add_question 携带 examPointIds；+2 回归测试（test_lesson_question_draft.py）｜ 已修，待用户重启后端后真实重生成验证
+
+- [x] 2026-08-29 关闭：[高] 生成下一课 10 分钟后显示"生成完成"，但目标课仍"内容生成中" ｜ 现象：job completed 但 task-d3-03 无 studyGuide；根因三层：①模型按 JSON Pointer 习惯返回 patch path `/sections/0/questions`，`content_patches._segments` 只认点号格式直接拒绝；②PATCH prompt 未约定 path 格式；③`generationHeadline` 只看 `job.status==='completed'`，掩盖 `result.partial=true` 的部分失败。修复：路径归一化兼容斜杠+纯数字段转下标；两个 PATCH prompt 明确格式与示例；headline 读取 `job.result.partial` 如实提示；+2 回归测试 ｜ 待用户重启后端后真实重生成验证
 - [x] 2026-08-28 关闭：[高] 课程划词删除反馈只显示提交成功，无删除预览/确认 ｜ 删除意图补“删去”；rewriteError 改为部分成功并支持原 feedbackId 重试；删除显示结构化预览与确认
 - [x] 2026-08-28 关闭：[高] 未确认/放弃的小节反馈提前污染生成规则且历史无减法 ｜ proposed→确认激活；legacy 仅 accepted 恢复；带锁存储、8轮上限、结束压缩、放弃/恢复及课程偏好启停/删除已实现
 - [x] 2026-08-28 关闭：[中] 侧边 AI 伴学“整体修改当前小节”生成一次预览后只能重填或应用，无法围绕候选版本继续多轮对话 ｜ 新增同一 feedback session 的 refine API、历史意见/上一版候选传递、对话式前端交互与回归测试
@@ -94,6 +101,7 @@
 
 ## ✅ 已完成（最近）
 
+- [x] 2026-08-29 移除01课前准备问题生成链路（用户决策）：根因是生成合同"2至5个问题"（content_prompts 结构模板 + story 模板 preparation_rules）与强反馈硬校验"最多1个"长期互相矛盾，每次生成必撞线。修复：删"最多1个"强反馈校验与"最多5个"结构校验；prompt 两处不再要求生成问题；新硬校验"01不应包含问题列表"；story 模板 version 5→6 使旧 checkpoint 缓存自动失效；降级模板与 4 处测试同步。前端 questions 渲染保留（旧课数据兼容，新课自然为空）
 - [x] 2026-08-28 完成课程生成可观察性与状态可信化：Job progress 持久化+lease fencing，刷新恢复最新活动/终态任务，单飞退避轮询，通信/预览/真实失败分离；课程规划、讲义/修复、自测/修复、模拟卷、保存阶段可见；真实 1/1 Job 尝试、心跳、模型统计和持久终态摘要；独立 hook/状态卡/纯逻辑模块
 - [x] 2026-08-28 完成课程划词反馈效果链与生命周期治理：删除预览/部分成功/重试/放弃/刷新恢复；服务端权威 proposal、workspace revision 与幂等 apply；规则确认制、会话压缩、课程偏好面板；新增带锁存储模块与 10 个后端/5 个前端回归测试
 - [x] 2026-08-28 完成课程划词反馈效果链与数据生命周期只读审计：定位本次“删去”未出删除预览的直接根因、确认反馈文件存储/规则提炼/后续生成注入链路，并形成待确认方案文档（仅 docs 变更，未实施代码、未运行代码验证）
@@ -119,6 +127,9 @@
 
 | 日期 | 内容 | 结果 |
 |---|---|---|
+| 2026-08-29 | 自测初稿生成调用补回 + patch artifact 字段分离：全量 pytest | ✅ 187 passed（+2）/ 97s |
+| 2026-08-29 | 移除01课前准备问题生成链路：全量 pytest / tsc / build | ✅ 185 passed / ✅ tsc / ⚠️ Vite 既有原生 exit 1（无关） |
+| 2026-08-29 | patch 路径斜杠兼容 + partial 如实展示：全量 pytest / tsc / build | ✅ 185 passed（+2）/ ✅ tsc / ⚠️ Vite 2249 modules 后既有原生 exit 1（与本轮无关） |
 | 2026-08-28 | 课程反馈生命周期：全量 pytest / Vitest / tsc / build | ✅ 173 passed / ✅ 5 passed / ✅ tsc / ⚠️ Vite 2249 modules 后既有原生 exit 1 |
 | 2026-08-28 | 阶段2-8 后全量 pytest（strategy 抽取后，含新增门面 ×2） | ✅ 161 passed / 97s |
 | 2026-08-28 | 阶段2-7 后全量 pytest（agent_chat 抽取后，含新增门面 ×2） | ✅ 159 passed / 101s |

@@ -991,11 +991,11 @@ def approve_strategy_documents(
             )
             evidence_context = retrieval.get("context", "") or _source_context(materials, course_id)
             def publish_content_progress(update: dict[str, Any]) -> None:
-                if job_id and (is_agent_job_cancelled(job_id) or (
+                stage = update.get("stage")
+                if stage != "lesson_built" and job_id and (is_agent_job_cancelled(job_id) or (
                     lease_token and not has_agent_job_ownership(job_id, lease_token)
                 )):
                     raise AgentJobCancelled("课程生成任务已停止或失去执行权")
-                stage = update.get("stage")
                 if stage == "content_plan" and isinstance(update.get("candidate"), dict):
                     _write_content_plan_preview(course_id, update["candidate"], workspace, str(update.get("runId", "")))
                 elif stage == "lesson_built" and isinstance(update.get("task"), dict):
@@ -1006,6 +1006,9 @@ def approve_strategy_documents(
                         update.get("practiceQuestions") or [],
                         str(update.get("runId", "")),
                     )
+                    # 已完成小节已经写入 workspace，立即刷新 Job 时间戳，
+                    # 让前端在批次仍 running 时也能读取并展示“开始学习”。
+                    publish_job_progress("lesson_built", str(update["task"].get("id", "")), 0)
 
             from .course_feedback_service import append_course_feedback_rules
 

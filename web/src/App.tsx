@@ -61,7 +61,6 @@ import {
   recordCourseTimeLog,
   repairCourseMockQuestions,
   rescanCourseMaterials,
-  reviewCourseReadability,
   restoreArchiveItem,
   searchCourse,
   saveCoursePrompt,
@@ -1568,12 +1567,6 @@ function App() {
     setActiveCourseId(refreshedWorkspace.course.id)
   }
 
-  async function handleReviewCourseReadability() {
-    if (!activeWorkspace) throw new Error('当前课程尚未加载。')
-    const reviewed = await reviewCourseReadability(activeWorkspace.course.id)
-    updateActiveWorkspace(() => reviewed)
-    setCourses((current) => mergeCourseList([reviewed.course], current))
-  }
 
   async function handleRepairStrategyGeneration(lessonLimit: number | null = 1) {
     if (!activeWorkspace?.strategyDocuments) throw new Error('当前课程没有可用于修复的策略文档。')
@@ -2067,7 +2060,6 @@ function App() {
           onApproveStrategyDocuments={handleApproveStrategyDocuments}
           onRefreshWorkspace={handleRefreshWorkspace}
           onRefreshStrategyGeneration={refreshStrategyGenerationStatus}
-          onReviewCourseReadability={handleReviewCourseReadability}
           onRepairStrategyGeneration={handleRepairStrategyGeneration}
           onCancelStrategyGeneration={handleCancelStrategyGeneration}
           onRepairMockGeneration={handleRepairMockGeneration}

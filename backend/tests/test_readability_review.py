@@ -28,7 +28,7 @@ def test_clear_standard_lesson_passes_and_does_not_rewrite_content() -> None:
     before = deepcopy(task["studyGuide"])
     report = attach_readability_review(task, "standard")
     assert report["status"] == "passed"
-    assert report["score"] == 100
+    assert "score" not in report
     stored = task["studyGuide"].pop("readabilityReview")
     assert stored == report
     assert task["studyGuide"] == before
@@ -43,6 +43,7 @@ def test_dense_text_duplicate_headings_and_formula_context_are_reported() -> Non
     report = review_study_guide(task)
     codes = {issue["code"] for issue in report["issues"]}
     assert report["status"] == "attention"
+    assert "score" not in report
     assert {"dense-paragraph", "formula-context", "duplicate-heading"} <= codes
 
 

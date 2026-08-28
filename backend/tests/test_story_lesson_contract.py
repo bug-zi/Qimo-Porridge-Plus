@@ -24,7 +24,7 @@ def _story_guide() -> dict:
             "conceptMappings": [{"storyElement": "等待窗口", "concept": "就绪态", "explanation": "条件齐备但未获得处理器"}],
         },
         "sections": [
-            {"kind": "preparation", "label": "课前准备", "title": "业务为什么停下", "narrative": "同一事件开始，并自然引向状态为什么变化。", "questions": ["状态为什么变化？"], "terms": [{"term": "进程状态", "meaning": "进程当前阶段", "storyMapping": "业务所处阶段", "role": "为状态判断建立术语底座"}]},
+            {"kind": "preparation", "label": "课前准备", "title": "业务为什么停下", "narrative": "同一事件开始，并自然引向状态为什么变化。", "terms": [{"term": "进程状态", "meaning": "进程当前阶段", "storyMapping": "业务所处阶段", "role": "为状态判断建立术语底座"}]},
             {"kind": "explanation", "label": "讲解", "title": "等待条件决定状态", "narrative": "接住同一事件解释术语。", "explanationBeats": [{"heading": f"问题{i}", "body": "沿因果解释。", "conclusion": "准确结论"} for i in range(1, 5)], "methodSummary": ["识别条件", "判断状态"], "transitionToExamples": "下面把状态变化放进题目。"},
             {"kind": "examples", "label": "例题", "title": "条件第一次变化", "narrative": "接住讲解进入题目。", "storyEventRef": "小周办理一项连续业务", "workedExamples": [main_example, variant_one, variant_two], "methodSummary": ["识别条件后判断"], "transitionToSelfCheck": "04撤去故事提示，转为独立作答。"},
             {"kind": "self-check", "label": "自测", "title": "撤去故事提示", "narrative": "独立判断。"},
@@ -71,9 +71,8 @@ def test_story_validator_rejects_old_shallow_section_shapes() -> None:
     examples = guide["sections"][2]
     examples["workedExamples"] = examples["workedExamples"][:1]
     issues = _study_guide_issues({"id": "task-1", "_contentStyle": "story", "studyGuide": guide}, {}, require_self_test=False)
-    preparation["questions"] = ["问题1", "问题2"] + [f"问题{i}" for i in range(4, 8)]
-    issues = _study_guide_issues({"id": "task-1", "_contentStyle": "story", "studyGuide": guide}, {}, require_self_test=False)
-    assert any("最多5个" in issue for issue in issues)
+    # 2026-08-29 契约：01课前准备不允许任何问题列表（硬伤，patch 应删除）
+    assert any("不应包含问题列表" in issue for issue in issues)
     assert any("3至8个" in issue for issue in issues)
     assert any("1个主故事综合例题" in issue for issue in issues)
 

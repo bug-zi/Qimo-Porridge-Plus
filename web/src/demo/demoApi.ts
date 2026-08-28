@@ -546,9 +546,9 @@ const demoApi: ApiSurface = {
     const ready = workspace.tasks.filter((task) => task.kind !== 'orientation' && task.studyGuide)
     const pending = workspace.tasks.filter((task) => task.kind !== 'orientation' && !task.studyGuide).length
     for (const task of ready) {
-      if (task.studyGuide) task.studyGuide.readabilityReview = { version: 1, status: 'passed', score: 94, issues: [], summary: '排版清晰，可直接阅读', taskId: task.id }
+      if (task.studyGuide) task.studyGuide.readabilityReview = { version: 1, status: 'passed', issues: [], summary: '排版清晰，可直接阅读', taskId: task.id }
     }
-    workspace.readabilityReview = { version: 1, status: pending ? 'attention' : 'passed', score: ready.length ? 94 : 0, reviewedAt: nowIso(), reviewedLessonCount: ready.length, passedLessonCount: ready.length, attentionLessonCount: 0, pendingLessonCount: pending, summary: pending ? `0 课需要关注，${pending} 课待生成` : '全部课程排版清晰', lessons: ready.map((task) => ({ taskId: task.id, status: 'passed' as const, score: 94, issueCount: 0 })) }
+    workspace.readabilityReview = { version: 1, status: pending ? 'attention' : 'passed', reviewedAt: nowIso(), reviewedLessonCount: ready.length, passedLessonCount: ready.length, attentionLessonCount: 0, pendingLessonCount: pending, summary: pending ? `0 课需要关注，${pending} 课待生成` : '全部课程排版清晰', lessons: ready.map((task) => ({ taskId: task.id, status: 'passed' as const, issueCount: 0 })) }
     return replaceWorkspace(courseId, workspace)
   },
 

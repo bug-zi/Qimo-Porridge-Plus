@@ -47,8 +47,7 @@ _SOFT_GUIDE_ISSUE_MARKERS = (
     "2至4道独立变式",         # #22 例题总数
     "1主例题+2至4独立变式",   # #23 主例/变式结构
     "mainEvent 不一致",       # #27 storyEventRef 措辞差异
-    "最多5个承上启下问题",    # 01 问题数量
-    "背景引导过长",           # 01 叙事超长
+    "背景引导过长",           # #01 叙事超长
     "缺少训练判断方法总结",   # 03 methodSummary（可由02兜底展示）
     "没有说明04转为独立作答", # transitionToSelfCheck 措辞缺失
 )
@@ -133,8 +132,10 @@ def _study_guide_issues(
             examples_section = by_kind.get("examples", {})
             if isinstance(preparation_section, dict):
                 questions = preparation_section.get("questions")
-                if isinstance(questions, list) and len(questions) > 5:
-                    issues.append(f"任务 {task_id} 的01课前准备最多5个承上启下问题")
+                if isinstance(questions, list) and questions:
+                    # 2026-08-29 用户决策：01课前准备不再生成任何问题列表
+                    # （旧合同"2至5个"与强反馈"最多1个"长期打架，最终统一为零）。
+                    issues.append(f"任务 {task_id} 的01课前准备不应包含问题列表，请在02讲解中自然承接")
                 terms = preparation_section.get("terms")
                 if not isinstance(terms, list) or not terms:
                     issues.append(f"任务 {task_id} 的01课前准备缺少本节关键词解释")

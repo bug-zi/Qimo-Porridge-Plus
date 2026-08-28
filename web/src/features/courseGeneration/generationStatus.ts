@@ -38,7 +38,16 @@ export function generationHeadline(session: StrategyGenerationSession, tasks: Pl
   const { job } = session
   if (job.status === 'failed') return '复习主线真实生成失败'
   if (job.status === 'cancelled') return '服务端已登记停止；当前模型调用可能仍在收尾'
-  if (job.status === 'completed') return '本批课程生成完成'
+  if (job.status === 'completed') {
+    // completed 只代表 handler 正常返回；result.partial=true 表示本批有课程未生成，
+    // 必须如实提示，不得用"生成完成"掩盖部分失败（课程卡片会仍显示"内容生成中"）。
+    const result = job.result as { partial?: boolean; pendingLessonCount?: number } | null
+    if (result?.partial) {
+      const pending = typeof result.pendingLessonCount === 'number' ? result.pendingLessonCount : ''
+      return `本批生成结束，但仍有 ${pending ? `${pending} 节` : '部分'}课程未完成，可再次生成补齐`
+    }
+    return '本批课程生成完成'
+  }
   if (session.stopRequested) return '已提交停止请求，等待当前调用结束'
   if (session.syncStatus === 'offline') return '状态同步中断，保留后台最后可信状态'
   if (session.syncStatus === 'degraded') return '状态同步波动，后台最后状态仍在运行'

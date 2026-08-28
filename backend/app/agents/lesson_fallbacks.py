@@ -96,7 +96,7 @@ def _backup_study_guide(task: dict[str, Any], lesson_input: dict[str, Any]) -> d
         ]
         guide["workedExamples"] = [main_example, *variants]
         guide["sections"] = [
-            {"kind": "preparation", "label": "课前准备", "title": f"事件开始：先看清「{point_name}」", "narrative": f"学习者进入一个与「{point_name}」直接相关的轻量场景。接下来沿着这个变化解释判断为何成立。", "questions": [incoming], "terms": [{"term": point_name, "meaning": point_summary, "storyMapping": "人物需要识别的关键条件", "role": "为02的正式因果讲解建立术语底座"}]},
+            {"kind": "preparation", "label": "课前准备", "title": f"事件开始：先看清「{point_name}」", "narrative": f"学习者进入一个与「{point_name}」直接相关的轻量场景。接下来沿着这个变化解释判断为何成立。", "terms": [{"term": point_name, "meaning": point_summary, "storyMapping": "人物需要识别的关键条件", "role": "为02的正式因果讲解建立术语底座"}]},
             {"kind": "explanation", "label": "讲解", "title": f"什么条件决定「{point_name}」的判断", "narrative": f"接住刚才的同一变化。{explanation}", "explanationBeats": [{"heading": heading, "body": body, "conclusion": point_summary, "pitfall": "核对定义、条件和边界"} for heading, body in [("对象发生了什么变化？", point_summary), ("为什么会出现这种变化？", explanation), ("哪些条件决定判断？", point_summary), ("怎样把条件连成判断方法？", explanation)]], "methodSummary": ["识别对象", "核对条件", "沿因果关系判断", "检查边界"], "transitionToExamples": "判断方法已经形成，下面把同一事件推进成一道综合例题。"},
             {"kind": "examples", "label": "例题", "title": "把同一事件变成一道综合题", "narrative": f"接住讲解中的事件进展，用刚形成的方法检验「{point_name}」。", "storyEventRef": main_event, "workedExamples": guide["workedExamples"], "methodSummary": ["先识别条件，再选择关系，最后复核边界"], "transitionToSelfCheck": "主例题和独立变式完成后，04将撤去故事与提示，转为独立作答。"},
             {"kind": "self-check", "label": "自测", "title": "离开故事提示独立判断", "narrative": "现在保留技术条件，撤去人物提示，独立完成自测。", "checklist": guide["checklist"]},

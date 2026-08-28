@@ -5,8 +5,6 @@ import re
 from typing import Any
 
 READABILITY_REVIEW_VERSION = 1
-READABILITY_PASS_SCORE = 80
-
 
 def _text(value: object) -> str:
     return str(value or "").strip()
@@ -56,7 +54,6 @@ def review_study_guide(task: dict[str, Any], content_style: str = "standard") ->
         return {
             "version": READABILITY_REVIEW_VERSION,
             "status": "unavailable",
-            "score": 0,
             "issues": [_issue("missing-guide", "课程正文尚未生成，暂时无法审核排版。", "studyGuide", severity="info", penalty=0)],
             "summary": "正文尚未生成",
         }
@@ -152,13 +149,11 @@ def review_study_guide(task: dict[str, Any], content_style: str = "standard") ->
         if key not in seen:
             seen.add(key)
             unique.append(item)
-    score = max(0, 100 - sum(int(item.get("penalty", 0)) for item in unique))
     public_issues = [{key: value for key, value in item.items() if key != "penalty"} for item in unique]
-    status = "passed" if score >= READABILITY_PASS_SCORE and not any(item["severity"] == "error" for item in public_issues) else "attention"
+    status = "passed" if not any(item["severity"] == "error" for item in public_issues) else "attention"
     return {
         "version": READABILITY_REVIEW_VERSION,
         "status": status,
-        "score": score,
         "issues": public_issues,
         "summary": "排版清晰，可直接阅读" if status == "passed" else f"发现 {len(public_issues)} 项可读性建议",
         "taskId": task_id,
@@ -183,18 +178,16 @@ def build_course_readability_review(tasks: list[dict[str, Any]], content_style: 
             pending += 1
             continue
         reports.append(attach_readability_review(task, content_style))
-    scores = [int(report["score"]) for report in reports]
     attention = sum(report["status"] == "attention" for report in reports)
     passed = sum(report["status"] == "passed" for report in reports)
     return {
         "version": READABILITY_REVIEW_VERSION,
         "status": "pending" if not reports else ("passed" if attention == 0 and pending == 0 else "attention"),
-        "score": round(sum(scores) / len(scores)) if scores else 0,
         "reviewedAt": reviewed_at or datetime.now().isoformat(timespec="seconds"),
         "reviewedLessonCount": len(reports),
         "passedLessonCount": passed,
         "attentionLessonCount": attention,
         "pendingLessonCount": pending,
         "summary": "尚无可审核课程" if not reports else ("全部课程排版清晰" if attention == 0 and pending == 0 else f"{attention} 课需要关注，{pending} 课待生成"),
-        "lessons": [{"taskId": report.get("taskId", ""), "status": report["status"], "score": report["score"], "issueCount": len(report["issues"])} for report in reports],
+        "lessons": [{"taskId": report.get("taskId", ""), "status": report["status"], "issueCount": len(report["issues"])} for report in reports],
     }

@@ -59,9 +59,6 @@ def _strong_feedback_issues(guide: dict[str, Any], directives: list[str]) -> lis
     terms = preparation.get("terms")
     if not isinstance(terms, list) or not terms or any(not isinstance(item, dict) or not str(item.get("term") or "").strip() or not str(item.get("meaning") or "").strip() for item in terms):
         issues.append("用户强反馈未执行：01必须包含本节关键词及解释")
-    questions = preparation.get("questions")
-    if isinstance(questions, list) and len(questions) > 1:
-        issues.append("用户强反馈未执行：01只允许最多1个用于衔接02的问题，不能沿用3至5题旧模板")
     narrative = str(preparation.get("narrative") or "").strip()
     if not narrative:
         issues.append("用户强反馈未执行：01缺少简短背景引导")

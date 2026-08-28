@@ -334,7 +334,6 @@ export type ReadabilityIssue = {
 export type LessonReadabilityReview = {
   version: number
   status: 'passed' | 'attention' | 'unavailable'
-  score: number
   issues: ReadabilityIssue[]
   summary: string
   taskId?: string
@@ -343,14 +342,13 @@ export type LessonReadabilityReview = {
 export type CourseReadabilityReview = {
   version: number
   status: 'passed' | 'attention' | 'pending'
-  score: number
   reviewedAt: string
   reviewedLessonCount: number
   passedLessonCount: number
   attentionLessonCount: number
   pendingLessonCount: number
   summary: string
-  lessons: Array<{ taskId: string; status: 'passed' | 'attention'; score: number; issueCount: number }>
+  lessons: Array<{ taskId: string; status: 'passed' | 'attention'; issueCount: number }>
 }
 
 export type StudyGuide = {

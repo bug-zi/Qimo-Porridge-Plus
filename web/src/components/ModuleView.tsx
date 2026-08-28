@@ -178,7 +178,6 @@ type ModuleViewProps = {
   onApproveStrategyDocuments: (payload: StrategyGenerationRequest) => Promise<void>
   onRefreshWorkspace: () => Promise<void>
   onRefreshStrategyGeneration: () => Promise<void>
-  onReviewCourseReadability: () => Promise<void>
   onRepairStrategyGeneration: (lessonLimit?: number | null) => Promise<void>
   onCancelStrategyGeneration: () => Promise<void>
   onRepairMockGeneration: () => Promise<void>
@@ -1000,11 +999,9 @@ function PlanView({
   knowledgePoints,
   onboarding,
   strategyGenerationJob,
-  readabilityReview,
   onModuleChange,
   onRefreshWorkspace,
   onRefreshStrategyGeneration,
-  onReviewCourseReadability,
   onRepairStrategyGeneration,
   onCancelStrategyGeneration,
   onStudyTask,
@@ -1021,11 +1018,9 @@ function PlanView({
   | 'knowledgePoints'
   | 'onboarding'
   | 'strategyGenerationJob'
-  | 'readabilityReview'
   | 'onModuleChange'
   | 'onRefreshWorkspace'
   | 'onRefreshStrategyGeneration'
-  | 'onReviewCourseReadability'
   | 'onRepairStrategyGeneration'
   | 'onCancelStrategyGeneration'
   | 'dailyProgress'
@@ -1038,7 +1033,6 @@ function PlanView({
   onStudyTask: (taskId: string) => void
 }) {
   const [isRefreshingGeneration, setIsRefreshingGeneration] = useState(false)
-  const [isReviewingReadability, setIsReviewingReadability] = useState(false)
   const [isRepairingGeneration, setIsRepairingGeneration] = useState(false)
   const [generationActionError, setGenerationActionError] = useState('')
   const activeGenerationJob = strategyGenerationJob?.courseId === course.id ? strategyGenerationJob : null
@@ -1073,17 +1067,6 @@ function PlanView({
     }
   }
 
-  async function reviewReadability() {
-    setIsReviewingReadability(true)
-    setGenerationActionError('')
-    try {
-      await onReviewCourseReadability()
-    } catch (reviewError) {
-      setGenerationActionError(reviewError instanceof Error ? reviewError.message : '课程排版审核失败')
-    } finally {
-      setIsReviewingReadability(false)
-    }
-  }
 
   async function cancelGeneration() {
     setGenerationActionError('')
@@ -1115,9 +1098,6 @@ function PlanView({
           <p>优先完成标记为高优先级的任务。每次练习后，计划会产生新的调整建议。</p>
         </div>
         <div className="plan-heading-actions" style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-          <button className="secondary-button" type="button" disabled={Boolean(isGeneratingPlan) || isReviewingReadability || completedContentCount === 0} onClick={reviewReadability}>
-            {isReviewingReadability ? <LoaderCircle className="is-spinning" size={16} /> : <Eye size={16} />} {isReviewingReadability ? '正在审核排版' : '审核课程排版'}
-          </button>
           <button className="secondary-button" type="button" onClick={() => setIsParamsDialogOpen(true)}>
             <SlidersHorizontal size={16} /> 调整复习参数
           </button>
@@ -1126,20 +1106,6 @@ function PlanView({
           </button>
         </div>
       </section>
-
-      {readabilityReview && (
-        <section className={`readability-review-banner is-${readabilityReview.status}`}>
-          <div className="readability-review-score">
-            <strong>{readabilityReview.pendingLessonCount > 0 ? '—' : readabilityReview.score}</strong>
-            <span>{readabilityReview.pendingLessonCount > 0 ? '尚未完成' : '易读性'}</span>
-          </div>
-          <div>
-            <strong>{readabilityReview.pendingLessonCount > 0 ? '课程排版审核尚未完成' : readabilityReview.status === 'passed' ? '课程排版审核通过' : '课程排版有改进建议'}</strong>
-            <p>{readabilityReview.pendingLessonCount > 0 ? ('当前仅审核 ' + readabilityReview.reviewedLessonCount + ' 课，仍有 ' + readabilityReview.pendingLessonCount + ' 课未生成，暂不计算全课程评分。') : readabilityReview.summary} · 最近审核 {new Date(readabilityReview.reviewedAt).toLocaleString('zh-CN')}</p>
-          </div>
-          <div className="readability-review-counts"><span>{readabilityReview.passedLessonCount} 课通过</span><span>{readabilityReview.attentionLessonCount} 课关注</span>{readabilityReview.pendingLessonCount > 0 && <span>{readabilityReview.pendingLessonCount} 课待生成</span>}</div>
-        </section>
-      )}
 
       {activeGenerationJob && (
         <CourseGenerationStatusCard
@@ -3380,7 +3346,7 @@ function StudyTaskView({
 
       {task.studyGuide?.readabilityReview && (
         <aside className={`lesson-readability-note is-${task.studyGuide.readabilityReview.status}`}>
-          <div><Eye size={17} /><strong>排版易读性 {task.studyGuide.readabilityReview.score} 分</strong><span>{task.studyGuide.readabilityReview.summary}</span></div>
+          <div><Eye size={17} /><strong>课程排版审核</strong><span>{task.studyGuide.readabilityReview.summary}</span></div>
           {task.studyGuide.readabilityReview.issues.length > 0 && <ul>{task.studyGuide.readabilityReview.issues.slice(0, 3).map((issue) => <li key={`${issue.code}-${issue.field}`}>{issue.message}</li>)}</ul>}
         </aside>
       )}

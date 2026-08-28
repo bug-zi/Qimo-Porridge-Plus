@@ -17,18 +17,19 @@ def test_rules_prompt_recovers_accepted_legacy_section_feedback_as_must(monkeypa
     assert "只需要有背景引导" in prompt
 
 
-def test_preparation_old_template_fails_strong_feedback_review() -> None:
+def test_preparation_with_questions_reports_strong_feedback_review() -> None:
+    # 2026-08-29 契约：01课前准备不允许问题列表（数量校验已统一移到
+    # _study_guide_issues 的"不应包含问题列表"硬伤，强反馈侧不再单管数量）。
     guide = {"sections": [
-        {"kind": "preparation", "title": "准备", "narrative": "背景", "questions": ["问题1", "问题2", "问题3"], "terms": [{"term": "进程", "meaning": "运行中的程序"}]},
+        {"kind": "preparation", "title": "准备", "narrative": "背景", "terms": [{"term": "进程", "meaning": "运行中的程序"}]},
         {"kind": "explanation", "title": "讲解", "narrative": "现在开始讲解。"},
     ]}
-    issues = _strong_feedback_issues(guide, ["MUST-1 [课前准备] 只需要背景引导、关键词解释、01与02衔接"])
-    assert any("3至5题旧模板" in issue for issue in issues)
+    assert _strong_feedback_issues(guide, ["MUST-1 [课前准备] 只需要背景引导、关键词解释、01与02衔接"]) == []
 
 
 def test_compliant_preparation_passes_strong_feedback_review() -> None:
     guide = {"sections": [
-        {"kind": "preparation", "title": "准备", "narrative": "一个进程正在等待事件。接下来从状态变化解释它为什么等待。", "questions": ["状态为什么会变化？"], "terms": [{"term": "进程状态", "meaning": "进程当前所处的运行阶段"}]},
+        {"kind": "preparation", "title": "准备", "narrative": "一个进程正在等待事件。接下来从状态变化解释它为什么等待。", "terms": [{"term": "进程状态", "meaning": "进程当前所处的运行阶段"}]},
         {"kind": "explanation", "title": "讲解", "narrative": "先从刚才的等待状态开始分析。"},
     ]}
     assert _strong_feedback_issues(guide, ["MUST-1 [课前准备] 只需要背景引导、关键词解释、01与02衔接"]) == []

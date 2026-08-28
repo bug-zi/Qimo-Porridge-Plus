@@ -30,7 +30,7 @@ LESSON_CONTENT_PROMPT = with_structured_formula_rules("""
    "workedExamples":[{"id":"...","title":"...","origin":"material|ai-adapted","independentVariant":false,"source":"内部依据，不在界面展示","problem":"完整具体题干","analysis":"识别考点与选择方法的过程","steps":["包含公式、代入、推导或论证的详细步骤"],"answer":"明确最终答案或结论","checks":["验算或结论检查"],"examPointIds":["本节考点id"]}],
    "storyContext":{"characters":["主要人物"],"setting":"生活化场景","mainEvent":"本节贯穿事件","incomingQuestion":"课前准备留下、讲解回答的问题","outgoingQuestion":"本节留下给下一课的问题","conceptMappings":[{"storyElement":"故事对象或行动","concept":"标准术语","explanation":"映射为何成立及边界"}]},
    "sections":[
-     {"kind":"preparation","label":"课前准备","title":"简短背景引导","narrative":"01的正文主体：写成可直接阅读的故事散文（至少2至3个自然段），让核心对象在具体事件中自然出现；禁止舞台说明式概括（如‘XX进入一个场景’‘接下来沿着变化解释’），最后一句自然引向02开头","questions":["2至5个由人物真实遇到的、02会回答的具体问题"],"terms":[{"term":"本节关键词","meaning":"准确且足够理解02的解释","storyMapping":"该词在背景事件中对应什么","role":"这个词在本节判断中的作用"}]},
+     {"kind":"preparation","label":"课前准备","title":"简短背景引导","narrative":"01的正文主体：写成可直接阅读的故事散文（至少2至3个自然段），让核心对象在具体事件中自然出现；禁止舞台说明式概括（如‘XX进入一个场景’‘接下来沿着变化解释’），最后一句自然引向02开头；不生成任何问题列表","terms":[{"term":"本节关键词","meaning":"准确且足够理解02的解释","storyMapping":"该词在背景事件中对应什么","role":"这个词在本节判断中的作用"}]},
      {"kind":"explanation","label":"讲解","title":"接住01同一事件的标题","narrative":"开头直接承接01最后一句与同一事件，写成正文段落而非过渡说明","explanationBeats":[{"heading":"问题式或事件式二级标题，共3至8项，建议4至7项","body":"可直接阅读的讲解正文：沿因果线推进，把知识写进故事事件的解释里，而不是脱离故事的讲义腔","conclusion":"准确结论","pitfall":"必要边界或易错点"}],"methodSummary":["可迁移的判断步骤"],"transitionToExamples":"自然引出03例题的事件进展"},
      {"kind":"examples","label":"例题","title":"承接02事件进展的标题","narrative":"开头接住02的transitionToExamples","storyEventRef":"与storyContext.mainEvent一致","workedExamples":["恰好1个主故事综合例题对象，再加2至4个independentVariant=true的独立变式对象"],"methodSummary":["本组训练实际使用的判断方法"],"transitionToSelfCheck":"说明04撤去故事与提示、转为独立作答"},
      {"kind":"self-check","label":"自测","title":"离开故事辅助后的独立判断","narrative":"简短承接且不提示答案","checklist":["独立作答要求"]}
@@ -46,6 +46,14 @@ LESSON_CONTENT_PROMPT = with_structured_formula_rules("""
 5. 语言亲切、直接、有信息量：共同观察时用“我们”；每句话至少完成一件事（提供事实、解释原因、限定边界或推动故事）；删除“先抓住、别担心、就行”等无信息安抚；禁用“不是……而是……”及机械变体；标题表达具体问题或故事中的关键变化，不用“概念介绍”“重点总结”式空标题。
 6. 类比必须与概念结构准确对应，并在同段或紧邻段落落回标准术语；故事人物、地点、日常事件可以虚构，技术事实、数据和条件不能虚构。
 7. examPoints.explanation 写成简明的考点卡片（供出题与检索用），不得与02的beats正文逐字重复——02负责“读得懂”，examPoints负责“查得快”。
+""")
+
+LESSON_CONTENT_PATCH_PROMPT = with_structured_formula_rules("""
+你是 Lesson Content Patch Agent。你不是重新创作讲义，而是在已有 studyGuide 初稿上做定向编辑。只处理输入列出的 blocking issues，保留未指定字段、事实、公式、题目条件、来源、故事主线和正确文本。只返回 JSON：{"patches":[{"op":"replace|add|remove","path":"允许的字段路径","value":"修改值"}]}。path 格式必须用点号加下标，如 sections[0].questions、sections[1].explanationBeats[2].body、examPoints[3].explanation、storyContext.mainEvent；禁止使用斜杠（/sections/0/questions 是错误格式）。根字段只允许 examPoints、workedExamples、storyContext、sections。删除数组元素用 remove（如 sections[0].questions 直接 remove 会清空整组问题，需保留1个时用 replace 写入保留后的问题数组）。不得返回完整 studyGuide，不得修改 id、taskId、knowledgePointId、source 或未授权路径。
+""")
+
+LESSON_PRACTICE_PATCH_PROMPT = with_structured_formula_rules("""
+你是 Lesson Practice Patch Agent。你不是重新生成整套自测，而是在已有 practiceQuestions 初稿上做定向编辑。只处理输入列出的 blocking issues，保留所有未涉及且合法的题目。修改题目时使用 questionId 和字段 path，path 格式必须用点号加下标（如 prompt、options[2]、explanation），禁止使用斜杠（/options/2 是错误格式）；缺失考点时使用 add_question 新增最少一道完整题，新增题必须携带 examPointIds 字段，取值为输入 studyGuide.examPoints 中该题覆盖的考点 id（覆盖校验只认 examPointIds，缺失即视为未覆盖）。只返回 JSON，不得返回完整 practiceQuestions，不得修改已有题目的 id、taskId、knowledgePointId、source。
 """)
 
 LESSON_PRACTICE_PROMPT = with_structured_formula_rules("""

@@ -2427,9 +2427,6 @@ textarea:focus-visible {
 }
 .readability-review-banner.is-passed { border-color: color-mix(in srgb, var(--mint) 48%, var(--line)); }
 .readability-review-banner.is-attention { border-color: color-mix(in srgb, var(--primary) 45%, var(--line)); }
-.readability-review-score { display: grid; width: 58px; height: 58px; place-content: center; border-radius: 50%; color: var(--primary); background: var(--primary-soft); text-align: center; }
-.readability-review-score strong { font-size: 21px; line-height: 1; }
-.readability-review-score span { margin-top: 3px; font-size: 9px; font-weight: 850; }
 .readability-review-banner > div:nth-child(2) > strong { font-size: 14px; }
 .readability-review-banner p { margin: 5px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
 .readability-review-counts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }

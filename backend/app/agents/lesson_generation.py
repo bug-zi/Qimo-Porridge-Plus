@@ -6,7 +6,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from .checkpoint_contracts import lesson_content_signature, lesson_guide_signature, lesson_questions_signature
-from .content_prompts import LESSON_CONTENT_PROMPT, LESSON_PRACTICE_PROMPT
+from .content_patches import apply_guide_patches, apply_question_patches
+from .content_prompts import (
+    LESSON_CONTENT_PATCH_PROMPT,
+    LESSON_CONTENT_PROMPT,
+    LESSON_PRACTICE_PATCH_PROMPT,
+    LESSON_PRACTICE_PROMPT,
+)
 from .content_validation import _study_guide_issues, split_guide_issues
 from .contracts import ReviewReport
 from .question_generation import _question_issues, _shuffle_single_choice_options, _strong_feedback_issues
@@ -182,6 +188,31 @@ class LessonBuilder:
                     pass
             return guide, deduped_issues
         
+        def patch_guide(base_guide: dict[str, Any], review_issues: list[str]) -> tuple[dict[str, Any], list[str]]:
+            patch_input = {
+                "task": task,
+                "studyGuideDraft": base_guide,
+                "reviewIssues": review_issues,
+                "evidence": lesson_evidence,
+            }
+            if self.publish_progress:
+                self.publish_progress("lesson_guide", task_id, 2)
+            model_json = self.scoped_model_json("lesson_guide", task_id) if self.scoped_model_json else self.model_json
+            result = model_json(LESSON_CONTENT_PATCH_PROMPT, json.dumps(patch_input, ensure_ascii=False), self.course_prompt)
+            self.check_cancelled()
+            patched = apply_guide_patches(base_guide, result)
+            issues = _study_guide_issues({**task, "_contentStyle": self.content_style, "studyGuide": patched}, {}, require_self_test=False)
+            issues.extend(_strong_feedback_issues(patched, self.strong_feedback_directives))
+            issues = list(dict.fromkeys(issues))
+            self.deps.save_artifact(
+                self.course_id,
+                f"lesson_guide_patch:{task_id}",
+                {"stage": "patch", "inputReviewIssues": review_issues, "patchOutput": result, "remainingIssues": issues},
+                status="checkpoint" if not split_guide_issues(issues)[0] else "failed",
+                source_run_id=self.run_id,
+            )
+            return patched, issues
+
         cached_guide_artifact = self.deps.get_latest_artifact(self.course_id, guide_artifact_type)
         cached_guide_content = cached_guide_artifact.get("content", {}) if cached_guide_artifact else {}
         guide = cached_guide_content.get("studyGuide") if cached_guide_content.get("signature") == guide_signature else None
@@ -195,15 +226,12 @@ class LessonBuilder:
             guide, guide_issues = generate_guide(attempt=1)
             guide_blocking, soft_guide_issues = split_guide_issues(guide_issues)
             if guide_blocking:
-                # 只把硬伤反馈给第二次尝试；软伤不再触发重生成。
-                guide, guide_issues = generate_guide(guide_blocking, attempt=2)
+                # 修复阶段只编辑初稿，不再重新生成完整 studyGuide。
+                guide, guide_issues = patch_guide(guide, guide_blocking)
                 guide_blocking, soft_guide_issues = split_guide_issues(guide_issues)
             if guide_blocking:
-                # 按用户决策移除降级模板：模型两次仍有硬伤（结构/内容缺失）时直接失败，
-                # 由上层标记该课“尚未完整生成”，任务保持无 studyGuide，下一轮自动重试模型。
-                # 失败原稿已由 generate_guide 落盘到 lesson_guide_failed:{task_id}，可回放诊断。
                 raise ValueError(
-                    f"任务 {task_id} 讲义连续两次未通过硬校验：" + "；".join(guide_blocking[:5])
+                    f"任务 {task_id} 讲义初稿定向修复后仍有硬伤：" + "；".join(guide_blocking[:5])
                 )
             else:
                 self.deps.save_artifact(
@@ -254,7 +282,8 @@ class LessonBuilder:
             else None
         )
         question_issues: list[str] = []
-        if isinstance(questions, list):
+        questions_from_cache = isinstance(questions, list)
+        if questions_from_cache:
             questions = normalize_practice_questions(questions, guide)
             practice_by_id = {
                 str(question.get("id")): question
@@ -264,29 +293,55 @@ class LessonBuilder:
             question_issues = _question_issues(questions, collection=f"任务 {task_id} 自测题")
             question_issues.extend(_study_guide_issues({**task, "_contentStyle": self.content_style, "studyGuide": guide}, practice_by_id))
         else:
-            question_issues = ["自测题检查点不可用"]
+            # 无有效检查点时必须先完整生成自测初稿（方案阶段三步骤1），
+            # 不允许拿空初稿直接走 patch：patch 的 add_question 常不带
+            # examPointIds，考点覆盖校验只认该字段，空稿进 patch 必然
+            # 再次失败（现场：task-d3-03 六个考点全部"未被覆盖"）。
+            questions, question_issues = generate_questions()
         # 与讲义同样的硬伤/软伤区分：故事数量/措辞类软伤不构成丢弃模型自测题的理由。
         question_blocking, soft_question_issues = split_guide_issues(question_issues)
         if question_blocking:
-            questions, question_issues = generate_questions()
-            question_blocking, _ = split_guide_issues(question_issues)
+            # 先留档输入问题：下方 question_blocking 会被重新赋值为修复后剩余问题，
+            # 直接引用会把"输入"存成"剩余"（现场 artifact 两者完全相同，误导诊断）。
+            input_question_issues = list(question_blocking)
+            patch_input = {
+                "task": task,
+                "studyGuide": guide,
+                "practiceQuestionsDraft": questions if isinstance(questions, list) else [],
+                "reviewIssues": question_blocking,
+            }
+            if self.publish_progress:
+                self.publish_progress("lesson_questions", task_id, 2)
+            model_json = self.scoped_model_json("lesson_questions", task_id) if self.scoped_model_json else self.model_json
+            patch_result = model_json(LESSON_PRACTICE_PATCH_PROMPT, json.dumps(patch_input, ensure_ascii=False), self.course_prompt)
+            self.check_cancelled()
+            questions = apply_question_patches(questions if isinstance(questions, list) else [], patch_result, task_id)
+            questions = normalize_practice_questions(questions, guide)
+            practice_by_id = {str(question.get("id")): question for question in questions if isinstance(question, dict) and question.get("id")}
+            question_issues = _question_issues(questions, collection=f"任务 {task_id} 自测题")
+            question_issues.extend(_study_guide_issues({**task, "_contentStyle": self.content_style, "studyGuide": guide}, practice_by_id))
+            question_blocking, soft_question_issues = split_guide_issues(list(dict.fromkeys(question_issues)))
+            self.deps.save_artifact(
+                self.course_id,
+                f"lesson_questions_patch:{task_id}",
+                {"stage": "patch", "inputReviewIssues": input_question_issues, "patchOutput": patch_result, "remainingIssues": question_issues},
+                status="checkpoint" if not question_blocking else "failed",
+                source_run_id=self.run_id,
+            )
             if question_blocking:
-                questions, question_issues = generate_questions(question_blocking)
-                question_blocking, _ = split_guide_issues(question_issues)
-            if question_blocking:
-                # 按用户决策移除降级题兜底：模型两次仍有硬伤时直接失败，该课保持
-                # 无 studyGuide 状态，由上层标记“尚未完整生成”，下一轮自动重试模型。
                 raise ValueError(
-                    f"任务 {task_id} 自测题连续两次未通过硬校验：" + "；".join(question_blocking[:5])
+                    f"任务 {task_id} 自测初稿定向修复后仍有硬伤：" + "；".join(question_blocking[:5])
                 )
-            else:
-                self.deps.save_artifact(
-                    self.course_id,
-                    question_artifact_type,
-                    {"signature": question_signature, "practiceQuestions": questions},
-                    status="checkpoint",
-                    source_run_id=self.run_id,
-                )
+        if not questions_from_cache:
+            # 初稿一次通过或 patch 通过都要落盘检查点（原语义：仅缓存未命中路径保存），
+            # 否则本节中断后重跑会重复整次自测生成。
+            self.deps.save_artifact(
+                self.course_id,
+                question_artifact_type,
+                {"signature": question_signature, "practiceQuestions": questions},
+                status="checkpoint",
+                source_run_id=self.run_id,
+            )
         report = ReviewReport(
             passed=True,
             issues=[],
