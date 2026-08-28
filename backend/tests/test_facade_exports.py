@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import agent_chat, material_parser, materials, model_profiles, paths, practice, review_plan, study_service
+from app import agent_chat, material_parser, materials, model_profiles, paths, practice, review_plan, study_service, strategy
 
 
 def test_paths_module_is_sole_owner_of_directory_constants() -> None:
@@ -291,3 +291,36 @@ def test_study_service_facade_reexports_agent_chat_domain() -> None:
 def test_agent_chat_module_does_not_import_study_service() -> None:
     """依赖方向约束：agent_chat 模块级不依赖 study_service（环检查）。"""
     assert "study_service" not in getattr(agent_chat, "__dict__", {})
+
+
+def test_study_service_facade_reexports_strategy_domain() -> None:
+    """策略文档域符号必须继续可从 study_service 导入且为同一对象。"""
+    facade_symbols = [
+        "COURSE_PROMPT_DELIMITER",
+        "REPLY_DELIMITER",
+        "REVIEW_PLAN_DELIMITER",
+        "STRATEGY_REVISION_TASK_PROMPT",
+        "_generate_strategy_documents_legacy",
+        "_read_strategy_document",
+        "_split_revision_output",
+        "_strategy_document_paths",
+        "_validate_strategy_content",
+        "_write_strategy_document",
+        "generate_strategy_documents",
+        "get_course_prompt",
+        "get_strategy_documents",
+        "mark_strategy_maintenance_pending",
+        "revise_strategy_draft",
+        "save_strategy_documents",
+        "update_course_prompt",
+    ]
+    for name in facade_symbols:
+        assert hasattr(study_service, name), f"门面缺失符号: {name}"
+        assert getattr(study_service, name) is getattr(strategy, name), (
+            f"{name} 不是 strategy 本体的同一对象（re-export 被副本覆盖）"
+        )
+
+
+def test_strategy_module_does_not_import_study_service() -> None:
+    """依赖方向约束：strategy 模块级不依赖 study_service（环检查）。"""
+    assert "study_service" not in getattr(strategy, "__dict__", {})
