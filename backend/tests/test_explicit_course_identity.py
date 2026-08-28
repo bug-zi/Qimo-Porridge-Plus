@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from app import paths
 from app import study_service
 
 
@@ -18,6 +19,6 @@ def test_empty_workspace_requires_explicit_course() -> None:
 
 
 def test_save_workspace_rejects_missing_course_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(study_service, "COURSES_DATA_DIRECTORY", tmp_path / "courses")
+    monkeypatch.setattr(paths, "COURSES_DATA_DIRECTORY", tmp_path / "courses")
     with pytest.raises(ValueError, match="必须提供 course_id"):
         study_service.save_workspace({"course": {}})

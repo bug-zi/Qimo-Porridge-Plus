@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import study_service
+from app import paths
 from app.auth_service import initialize_auth_database
 from app.main import app, initialize_database
 from app.routers import deps
@@ -30,9 +31,11 @@ def client(tmp_path, monkeypatch):
 
     monkeypatch.setattr(deps, "DATA_DIRECTORY", data_dir)
     monkeypatch.setattr(deps, "DATABASE_PATH", db_path)
-    monkeypatch.setattr(study_service, "DATA_DIRECTORY", data_dir)
-    monkeypatch.setattr(study_service, "COURSES_DATA_DIRECTORY", courses_dir)
-    monkeypatch.setattr(study_service, "MATERIAL_CACHE_DIRECTORY", data_dir / "material_cache")
+    # study_service 及其拆分模块（model_profiles / material_parser / materials）
+    # 一律走 paths.X 属性访问，patch paths 即全局生效（阶段2-1 起）。
+    monkeypatch.setattr(paths, "DATA_DIRECTORY", data_dir)
+    monkeypatch.setattr(paths, "COURSES_DATA_DIRECTORY", courses_dir)
+    monkeypatch.setattr(paths, "MATERIAL_CACHE_DIRECTORY", data_dir / "material_cache")
 
     initialize_database()
     initialize_auth_database()
