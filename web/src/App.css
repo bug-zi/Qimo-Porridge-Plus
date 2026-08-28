@@ -12786,20 +12786,20 @@ code .formula-symbol sup {
   gap: 14px;
   align-items: start;
   padding: 18px;
-  border: 1px solid var(--border-color, #d9e2ec);
+  border: 1px solid var(--line);
   border-radius: 16px;
-  background: var(--card-bg, #fff);
+  background: var(--surface);
 }
 .course-generation-card.sync-degraded,
 .course-generation-card.sync-offline { border-color: #e6a23c; }
 .course-generation-card.is-failed { border-color: #e45b5b; }
-.course-generation-card-icon { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 12px; background: #edf5ff; color: #2775d7; }
+.course-generation-card-icon { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 12px; background: var(--primary-soft); color: var(--primary); }
 .course-generation-card-icon.health-delayed,
-.course-generation-card-icon.health-stale { background: #fff3d6; color: #a96700; }
+.course-generation-card-icon.health-stale { background: color-mix(in srgb, var(--peach) 18%, var(--surface)); color: var(--peach); }
 .course-generation-card-body { min-width: 0; }
 .course-generation-card-body > strong { display: block; margin-bottom: 9px; font-size: 1rem; }
 .course-generation-metrics { display: flex; flex-wrap: wrap; gap: 7px; }
-.course-generation-metrics span { padding: 4px 8px; border-radius: 999px; background: var(--soft-bg, #f3f6f9); font-size: .78rem; color: var(--muted-text, #5f6b78); }
+.course-generation-metrics span { padding: 4px 8px; border-radius: 999px; background: var(--surface-muted); font-size: .78rem; color: var(--text-muted); }
 .course-generation-note,
 .course-generation-warning,
 .course-generation-error { margin: 9px 0 0; font-size: .84rem; line-height: 1.55; }
