@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import material_parser, materials, model_profiles, paths, practice, study_service
+from app import material_parser, materials, model_profiles, paths, practice, review_plan, study_service
 
 
 def test_paths_module_is_sole_owner_of_directory_constants() -> None:
@@ -241,3 +241,27 @@ def test_study_service_facade_reexports_practice_domain() -> None:
 def test_practice_module_does_not_import_study_service() -> None:
     """依赖方向约束：practice 模块级不依赖 study_service（环检查）。"""
     assert "study_service" not in getattr(practice, "__dict__", {})
+
+
+def test_study_service_facade_reexports_review_plan_domain() -> None:
+    """复习计划域符号必须继续可从 study_service 导入且为同一对象。"""
+    facade_symbols = [
+        "_parse_plan_date",
+        "build_daily_progress",
+        "delete_time_entry",
+        "maintain_review_plan",
+        "rebalance_daily_plan",
+        "record_time",
+        "replan_review_mainline",
+        "update_workspace_state",
+    ]
+    for name in facade_symbols:
+        assert hasattr(study_service, name), f"门面缺失符号: {name}"
+        assert getattr(study_service, name) is getattr(review_plan, name), (
+            f"{name} 不是 review_plan 本体的同一对象（re-export 被副本覆盖）"
+        )
+
+
+def test_review_plan_module_does_not_import_study_service() -> None:
+    """依赖方向约束：review_plan 模块级不依赖 study_service（环检查）。"""
+    assert "study_service" not in getattr(review_plan, "__dict__", {})
