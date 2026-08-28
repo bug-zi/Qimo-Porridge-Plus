@@ -19,10 +19,10 @@
 |---|---|
 | 日期 | 2026-08-28 |
 | 分支 | dev |
-| 后端测试 | ✅ 153 passed / 96s（2026-08-28，阶段2-4 拆分后，门面契约测试 ×10） |
+| 后端测试 | ✅ 155 passed / 100s（2026-08-28，阶段2-5 拆分后，门面契约测试 ×12） |
 | 前端 tsc / build | ✅ `npx tsc -b`；⚠️ build 转换 2265 modules 后 exit 1（既有 Windows 原生构建问题） |
 | 工作区 | 阶段2-1~2-4 已提交；用户未提交改动仍在工作区（答案一致性 + 小节多轮对话代码，其看板条目已随 docs 提交入库） |
-| 当前主线 | 阶段0止血 ✅ → 阶段1 AI工作流稳定性 ✅ → 队列双重执行修复 ✅ → 阶段2 拆分 study_service（2-1~2-4 ✅，后续拆分待排期） |
+| 当前主线 | 阶段0止血 ✅ → 阶段1 AI工作流稳定性 ✅ → 队列双重执行修复 ✅ → 阶段2 拆分 study_service（2-1~2-5 ✅，后续拆分待排期） |
 | 架构债提醒 | uvicorn --reload 在中文路径下失效（改代码不重启），修复需手动重启后端 |
 
 ---
@@ -56,7 +56,8 @@
 - [x] 2-2 抽取 material_parser.py（资料解析域：MarkItDown/Docling/RapidOCR/视觉级联、转 PDF、XLSX、缓存）（c090366）
 - [x] 2-3 抽取 materials.py（资料管理域：扫描/上传/删除、主辅角色、资料记忆、知识库同步）（7024558）
 - [x] 2-4 抽取 workspace.py（工作空间域：load/save/锁、路径助手、内容质量迁移、空工作区、mind_map）（da02ca3）
-- [ ] 继续拆分 `study_service.py`（现 ~3460 行）：练习/错题域、复习计划域、agent 对话域等，旧文件 re-export 门面模式不变
+- [x] 2-5 抽取 practice.py（练习/错题/模拟卷域：刷题/错题重做判分、AI 举一反三、掌握度联动、模拟卷修复与计分、计算题批改）
+- [ ] 继续拆分 `study_service.py`（现 ~3140 行）：复习计划域、agent 对话域、策略文档域等，旧文件 re-export 门面模式不变
 
 **阶段3（前端结构）**
 
@@ -81,6 +82,7 @@
 
 ## ✅ 已完成（最近）
 
+- [x] 2026-08-28 阶段2-5 完成：practice.py 抽取（刷题/错题重做判分、AI 举一反三、掌握度联动、模拟卷修复与计分、计算题 AI 批改），study_service 3465→3142 行；repair_mock_questions 测试打桩点经延迟 import study_service 保持；门面契约测试 +2
 - [x] 2026-08-28 阶段2-4 完成：workspace.py 抽取（load/save/锁、路径助手、内容质量迁移、空工作区、mind_map），study_service 4135→3465 行；load/save 的历史打桩面（monkeypatch study_service 命名空间）经函数级延迟 import 保持不变；门面契约测试 +2（da02ca3）
 - [x] 2026-08-28 阶段2-1~2-3 完成：study_service.py 5482→4132 行，拆出 model_profiles / material_parser / materials + paths.py 路径常量收敛；re-export 门面 + 门面契约测试 ×8 锁定；三个独立提交（167357e / c090366 / 7024558）
 - [x] 2026-08-28 完善“整体修改当前小节”多轮对话：可连续补充意见、保留历史要求并迭代候选预览，最终确认应用最新版本；切换小节自动重置会话
@@ -97,6 +99,7 @@
 
 | 日期 | 内容 | 结果 |
 |---|---|---|
+| 2026-08-28 | 阶段2-5 后全量 pytest（practice 抽取后，含新增门面 ×2） | ✅ 155 passed / 100s |
 | 2026-08-28 | 阶段2-4 后全量 pytest（workspace 抽取后，含新增门面 ×2） | ✅ 153 passed / 96s |
 | 2026-08-28 | 阶段2-3 后全量 pytest（materials 抽取后） | ✅ 151 passed / 96s |
 | 2026-08-28 | 阶段2-2 后全量 pytest（material_parser 抽取后） | ✅ 149 passed / 96s |
@@ -118,6 +121,7 @@
 
 | 日期 | commit | 说明 |
 |---|---|---|
+| 2026-08-28 | 7a2d38e | refactor(practice): 抽取练习/错题/模拟卷域到 practice.py（阶段2-5） |
 | 2026-08-28 | da02ca3 | refactor(workspace): 抽取工作空间域到 workspace.py（阶段2-4） |
 | 2026-08-28 | 7024558 | refactor(materials): 抽取资料管理域到 materials.py（阶段2-3） |
 | 2026-08-28 | c090366 | refactor(materials): 抽取资料解析域到 material_parser.py（阶段2-2） |
