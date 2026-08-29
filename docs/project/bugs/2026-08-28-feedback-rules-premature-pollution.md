@@ -1,0 +1,12 @@
+﻿# 未确认/放弃的小节反馈提前污染生成规则
+- 档案号：2026-08-28-feedback-rules-premature-pollution
+- 发现时间：2026-08-28（只读审计发现）
+- 严重度：高
+- 所属域：modules/course-feedback
+- 发现场景：提交反馈后未确认/放弃的提案进入生成规则
+- 错误现象：历史无减法，规则只增不减，未确认的意见也生效
+- 导致后果：生成规则与用户真实意愿漂移，课程风格跑偏
+- 根因：proposed 状态未与 accepted 区分即注入；legacy 恢复不筛 accepted
+- 建议修复方式：proposed→确认激活；legacy 仅 accepted 恢复；带锁存储、8 轮上限、结束压缩、放弃/恢复、课程偏好启停/删除
+- 状态：✅ 已关闭（2026-08-28）
+- 关联：看板；course_feedback_store.py
