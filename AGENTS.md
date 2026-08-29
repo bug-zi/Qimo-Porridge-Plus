@@ -8,6 +8,8 @@
 - 验证三件套（pytest / tsc / build，改完必跑）
 - 大文件修改守则（study_service.py / ModuleView.tsx）
 - Git 提交纪律
-- 实时开发看板 `docs/DEV_BOARD.md` 的维护义务（**每个会话结束必须更新**）
+- 实时开发看板 `docs/project/DEV_BOARD.md` 的维护义务（**每个会话结束必须更新**）
+- 文档框架 `docs/docs.md`（宪法）：涉及某域改动前先读该域 design.md / designs-specs.md（已有时）；
+  有实质工作的会话结束时写当日开发日志 `docs/project/log/`
 
 不要另行创建重复的约束文件；约束变更直接改 `CLAUDE.md`。
