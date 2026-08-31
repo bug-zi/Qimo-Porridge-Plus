@@ -17,6 +17,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import agent_chat, material_parser, materials, model_profiles, paths, practice, review_plan, study_service, strategy
 
+import pytest
+
+# conftest 的 autouse 夹具会把 paths.MATERIAL_CACHE_DIRECTORY 重定向到临时目录；
+# 本测试断言的是 paths 的默认接线（真实值），故豁免隔离。
+pytestmark = pytest.mark.no_material_cache_isolation
+
 
 def test_paths_module_is_sole_owner_of_directory_constants() -> None:
     """路径常量收敛点：paths 定义、study_service 门面别名、值一致。"""

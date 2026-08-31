@@ -36,26 +36,25 @@ npm run build
 ```
 
 - 改动必须三项全绿才算完成；失败时修到绿或明确回退，**不许带着红灯提交**。
-- 全量测试约 17 秒，不要为省时间只跑单文件。
+- 全量测试约 105 秒（187 项，2026-09-01 实测），不要为省时间只跑单文件。
 - 测试失败时优先怀疑自己的改动，而不是改测试迁就代码；只有确认契约本身变了才改测试（如本文件末尾的案例）。
 
 ## 大文件修改守则
 
-以下文件过大（5000+ 行），AI 单次会话无法完整理解，修改时必须：
+以下文件仍过大（5000+ 行），AI 单次会话无法完整理解，修改时必须：
 
 | 文件 | 规模 | 守则 |
 |---|---|---|
-| `backend/app/study_service.py` | ~5400 行 / 179 函数 | 优先把要改的函数**先抽到新模块再改**；禁止在此文件新增顶层函数；改动前先 grep 确认所有调用方 |
-| `web/src/components/ModuleView.tsx` | ~5700 行 / 108 useState | 同上，新功能放新组件文件；禁止在此文件新增顶层组件 |
+| `web/src/components/ModuleView.tsx` | ~5900 行 / 103 useState | 新功能放新组件文件；禁止在此文件新增顶层组件；改动前先 grep 确认所有调用方 |
 
-- 长期方向：按职责持续拆分（model_client / model_profiles / workspace 等），旧文件保留 re-export 门面，外部 import 零改动。
-- 改这两个文件前后都要跑验证三件套。
+- `backend/app/study_service.py` 已拆分至 ~1700 行（阶段 2-1~2-8 完成，model_client / model_profiles / agent_runtime / workspace 等已抽出），不再属于大文件，但继续遵守"先抽到新模块再改"的方向，旧文件保留 re-export 门面，外部 import 零改动。
+- 改 ModuleView.tsx 前后都要跑验证三件套。
 
 ## AI 工作流/模型调用约束
 
-- 模型调用链路在 `study_service.py` 的 `_provider_request` / `_model_providers` 一带（正逐步抽到独立模块），当前策略：非流式 + 长超时 + 重试预算 + 主备 failover + 熔断。
-- **已知架构债**：非流式整包等待导致无法区分"上游挂死"和"思考型模型静默"，超时参数陷入两难。既定方向：改流式 + 首 token 超时（30s 无首字节判死）。在完成此改造前，不要单纯调小 `MODEL_REQUEST_TIMEOUT_SECONDS`（曾因 300s 误杀正常慢请求造成假死循环，历史见该常量处注释）。
-- `AgentJobWorker` 按单进程单线程设计，**不要开多个 uvicorn worker**。
+- 模型调用链路已抽到独立模块 `model_client.py`（`_provider_request` / `_model_providers` / 超时常量都在此），`study_service.py` 通过 re-export 门面保持外部符号不变。当前策略：**流式 SSE + 首 token 超时 30s**（`MODEL_FIRST_TOKEN_TIMEOUT_SECONDS`，无首字节判死）+ 整流读超时上限 + 重试预算 + 主备 failover + 熔断。
+- 流式 + 首 token 超时改造（阶段1-2）已完成；剩余待办是 P1 真实上游端到端验收（见看板）。历史教训仍然有效：不要单纯调小 `MODEL_REQUEST_TIMEOUT_SECONDS`——它现在只约束"首字节之后的总读流时长"，首 token 超时由独立参数把关。
+- `AgentJobWorker` 在 `agent_runtime.py`，按单进程单线程设计，**不要开多个 uvicorn worker**。
 - 生成失败必须显式报错，禁止用低质量内容假装成功（历史决策，不许回退）。
 
 ## 重大更新先研究、规划、确认
