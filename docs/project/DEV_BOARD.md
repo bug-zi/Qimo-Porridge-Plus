@@ -17,20 +17,22 @@
 
 | 项 | 状态 |
 |---|---|
-| 日期 | 2026-09-01 |
+| 日期 | 2026-09-24 |
 | 分支 | feature |
 | 后端测试 | ✅ 187 passed / 105s（2026-09-01 本会话实测，无代码改动仅核验） |
 | 前端 tsc / test / build | ✅ `npx tsc -b`；✅ Vitest 5 passed；⚠️ build 转换 2249 modules 后原生 exit 1（既有 Windows Vite/Rolldown 问题） |
 | 反馈后端路由验收 | ✅ 8000 OpenAPI 已确认 open/retry/abandon/rules merge/update/delete/global refine/apply 全部注册 |
 | 项目阶段切换 | 🧊 **进入学习/冻结期**（2026-08-29 用户决策）：暂不增不改功能；两件事——①通读理解现有代码 ②建立新的 AI 协作文档框架 |
-| AI 协作框架 | ✅ `docs/` v1.2（2026-08-30）：宪法新增 §6「AI 生成语言规范」（用户执笔专区）；《项目架构解析》已并入 project.md 并删原件。此前 v1.1（2026-08-29）：project/study 双库 + 29 域骨架 + 3 样板域 + bugs/ 档案库 + draft/。详见 `log/2026-08-29.md`、`log/2026-08-30.md` |
-| 看板新位置 | 本文件位于 `docs/project/DEV_BOARD.md`；Bug 细节持久档案在 `docs/project/bugs/`，看板 🐛 区只留活跃/待验证条目 |
-| 后续计划 | ✅ 已完成当前项目考核；新计划见 [1m`docs/后续项目考核与任务实施计划.md`[0m；旧反馈方案已归档删除 |
+| AI 协作框架 | ✅ `docs/` 机制正本 v2.1（2026-09-24）：v2.0 结构清理——core/ 9 引擎域并入 modules/（29 域）、bugs/ 错误档案与 draft/ 风格实验稿并入 `全局/archive/`，docs-creator 标准结构达成；机制正本 `project/README.md`（权责表 / spec-plan / 归档四步 / 三区按轮归档 / 语言规范），log 迁 `docs/log/` 改 YYMMDD，旧库整体冻结 `doc/` 只读。v2.0 当日重构与 v1.x 宪法历史见 `全局/archive/文档库混合升级方案.md`、`doc/docs.md`。详见 `log/260924.md` 会话 1/5/6 |
+| 看板新位置 | 本文件位于 `docs/project/DEV_BOARD.md`；Bug 细节持久档案在 `docs/project/全局/archive/`（索引 archive.md），看板 🐛 区只留活跃/待验证条目 |
+| 后续计划 | ✅ 已完成当前项目考核；新计划见 [1m`docs/project/全局/archive/后续项目考核与任务实施计划.md`[0m；旧反馈方案已归档删除 |
 | 工作区 | 阶段2-6~2-8 已提交；用户未提交改动仍在工作区（答案一致性 + 小节多轮对话代码，其看板条目已随 docs 提交入库） |
 | 当前主线 | 阶段0止血 ✅ → 阶段1 AI工作流稳定性 ✅ → 队列双重执行修复 ✅ → 阶段2 拆分 study_service（2-1~2-8 ✅，study_service 5482→1687 行；剩余域待排期） |
 | CLAUDE.md 校准 | ✅ 2026-09-01 全文审计并更新 4 处过时信息：study_service 5400→~1700 行已非大文件、模型链路已抽至 model_client.py、流式+首token超时已完成（"已知架构债"改写为已完成+P1待验收）、测试时长 17s→105s；ModuleView.tsx 仍是大文件（5910 行/103 useState） |
-| 学习进度 | 2026-09-01：总图校准中；学习顺序已明确为 A→B→C→D→E→F，阶段 A 的请求链路框架已整理，接下来进入前端请求封装与后端路由/依赖的最短链路 |
+| 学习进度 | 2026-09-01：已将学习方式升级为“项目老开发者带新人”带教模式；一轮一个问题，先为什么后怎么做，含轻量检查点并交还选择权。方案见 `docs/project/全局/新人带教式项目学习模式优化方案.md`，待用户审阅；A→B→C→D→E→F 主线保留 |
+| 域双文档 | 🌱 2026-09-24 全 29 域两件套齐备：26 域 design.md/designs-specs.md 从代码逆向补全（**AI 起草稿待开发者审定**），刷题/设置/模型调用 3 样板域保留；域目录已改中文名（英文标识保留对照）；调研中发现 agent_chat 缺 import 缺陷已建档 |
 | 架构债提醒 | uvicorn --reload 在中文路径下失效（改代码不重启），修复需手动重启后端 |
+| 本地启动 | ✅ 根目录 `启动项目.bat`（纯 ASCII 双击入口）+ `start.ps1`（UTF-8 BOM 实际逻辑，可读可编辑）：一键拉起 uvicorn 8000 + Vite 5173，端口占用自动跳过，实测通过（详见 log/260924.md 会话 3） |
 
 ---
 
@@ -61,12 +63,11 @@
 
 - [ ] 停服后的备份/恢复脚本或明确步骤文档
 - [ ] 区分测试数据与个人正式数据的机制，避免误清库
-- [ ] 课程生成效率优化（方案待用户确认）｜ 详见 `docs/课程生成效率优化方案.md`
+- [ ] 课程生成效率优化（方案待用户确认）｜ 详见 `docs/project/全局/课程生成效率优化方案.md`
   - 基线：用户最近单节约 9 分钟、7.5 分钟；审计结论为主要耗时来自讲义+自测两次串行大模型调用，返工/重试会放大
   - 第一轮建议：阶段耗时基线 + 自测缺失考点增量补题；不降低硬校验、不启用低质兜底、不直接缩短总超时/并行 worker
   - 后续再基于 5~10 次真实数据评估上下文精简、轻量自测模型或合并调用实验
 - [x] 2026-08-28 修复课程生成完成后无法继续生成下一节：完成态 Job 摘要继续保留时，计划页仍根据待生成课程显示“生成下一课/下 3 课/剩余全部”按钮；仅 queued/running 隐藏重复入队入口
-- [ ] 补本地首次安装、依赖检查、启动说明
 
 **阶段2（后端结构，2-1~2-8 已完成）**
 
@@ -93,6 +94,7 @@
 
 ## 🐛 Bug 跟踪
 
+- [ ] 2026-09-24 新增：[高] agent_chat.py 缺 `run_tutor_agent(_stream)` import，NameError 被宽 except 吞掉，Agent 工具循环在流式/非流式两路径均不可达（AI伴学恒走降级 RAG 问答） ｜ 2026-09-24 文档逆向调研静态发现（L484/L686 调用但模块 import 区无此名，grep 复核确认无 setattr 注入）｜ 根因：2719755 抽取 agent_chat.py 时漏带 tutor import ｜ 已建档 `全局/archive/2026-09-24-agent-chat-tutor-unreachable.md` ｜ 待开发者决策修复（冻结期只记不修）
 - [ ] 2026-08-29 新增：[高] 无自测检查点时直接拿空初稿走 patch，补题不带 examPointIds 导致考点覆盖校验循环失败 ｜ 现象：task-d3-03"调度概念"课讲义成功但自测环节失败，前端永远"内容生成中"，面板只显示 2 次模型调用 ｜ 根因：定向微调重构把 `generate_questions()` 首次调用删丢，patch 的 add_question 不带 examPointIds 而覆盖校验只认该字段 ｜ 修复：补回初稿生成调用（方案阶段三步骤1）、恢复初稿一次通过时的 checkpoint 落盘、patch artifact 输入/剩余问题分离、patch Prompt 明确要求 add_question 携带 examPointIds；+2 回归测试（test_lesson_question_draft.py）｜ 已修，待用户重启后端后真实重生成验证
 
 - [x] 2026-08-29 关闭：[高] 生成下一课 10 分钟后显示"生成完成"，但目标课仍"内容生成中" ｜ 现象：job completed 但 task-d3-03 无 studyGuide；根因三层：①模型按 JSON Pointer 习惯返回 patch path `/sections/0/questions`，`content_patches._segments` 只认点号格式直接拒绝；②PATCH prompt 未约定 path 格式；③`generationHeadline` 只看 `job.status==='completed'`，掩盖 `result.partial=true` 的部分失败。修复：路径归一化兼容斜杠+纯数字段转下标；两个 PATCH prompt 明确格式与示例；headline 读取 `job.result.partial` 如实提示；+2 回归测试 ｜ 待用户重启后端后真实重生成验证
@@ -109,6 +111,13 @@
 
 ## ✅ 已完成（最近）
 
+- [x] 2026-09-24 域目录中文化 + 全域双文档补全（机制正本 v2.2）：29 个域目录改中文名（英文标识保留于 modules.md / project.md §8 对照）；26 域 design.md/designs-specs.md 经 10 个并行只读调研从代码逆向补全（标注 AI 起草稿待开发者审定），刷题/设置/模型调用 3 样板域原样保留；核验修正 mind_map 为独立文件非 workspace 内嵌；**发现并建档 agent_chat 缺 import 缺陷（Agent 工具循环不可达，冻结期只记不修）**；纯文档变更，验证三件套不适用
+- [x] 2026-09-24 网页标签栏图标切回 `app-icon.png`：文件已就位，`web/index.html` 的 `<link rel="icon">` 由 favicon.svg 改回 `/app-icon.png`（type image/png），撤回会话 4 的临时改指；grep 确认无其他引用残留；tsc 通过，build 复现既有 Rolldown 原生退出（无关）；dev server 下用户浏览器实测确认显示正常
+- [x] 2026-09-24 文档库结构清理（机制正本 v2.1）：core/ 9 引擎域并入 modules/（共 29 域，core.md 说明并入 modules.md）；bugs/ 11 份错误档案并入 全局/archive/（索引并入 archive.md，建档义务同步改指）；draft/course-style-lab/ 并入 全局/archive/。core.md/bugs.md 原件入 archive/ 保存；全库引用修正（project.md/README.md/全局.md/idea.md/practice specs/CLAUDE.md/看板），grep 核验活动文档旧路径零残留
+- [x] 2026-09-24 文档库按 docs-creator 体系整体重构（机制正本 v2.0）：docs/ 整体改名 doc/ 冻结只读；新 docs/ 按 skill 结构重建——project/README.md 机制正本（权责表/spec-plan/归档四步/语言规范）、log 迁 docs/log/ 改 YYMMDD、ideas 灵感池并入新功能开发区+优化建议区、questions.md→问题疑惑区.md、proposals→全局/；modules/core/study/bugs/draft/DEV_BOARD 原样迁入；学习文档编排方案补归档；CLAUDE/AGENTS 接线 + conftest.py 注释路径修正（纯注释，随改跑全量 pytest）
+- [x] 2026-09-24 修复网页标签栏图标不显示：`web/index.html` 引用的 `/app-icon.png`（png 类型）在 public/ 中不存在，dev 下被 SPA fallback 以 HTML 应答导致图标渲染失败；改指已存在的 `public/favicon.svg`（type 改 image/svg+xml）。实测 dev server 下 `/favicon.svg` 返回 200 且浏览器成功拉取；tsc 通过；build 复现既有原生 exit（无关）
+- [x] 2026-09-24 文档库混合升级（宪法 v1.3）：并入 docs-creator skill 机制——新增 questions.md 问题疑惑区（AI 不主动查阅/按轮归档）、§2.4 域内 spec/plan、§4.6 域内归档（固定四步/永不删除）、log 创建时间行；权限表 +3 行；方案文档按四步归档 proposals/archive/。仅文档变更，无代码改动，三件套不适用
+- [x] 2026-09-24 新增本地一键启动脚本：根目录 `启动项目.bat`（纯 ASCII 三行入口）+ `start.ps1`（UTF-8 BOM，实际逻辑）——检查 .venv/.env/node_modules、端口占用自动跳过（可重复执行）、分窗口拉起后端 uvicorn 8000 与前端 Vite 5173 并打开浏览器；实测真实拉起双服务、health 200 后清理。乱码修复：bat 含中文必须 GBK（UTF-8+chcp 或 LF 行尾会解析错乱），GBK 在编辑器又必乱码——故 bat 只留 ASCII 入口，中文逻辑全部放 PowerShell（5.1 读 UTF-8 必须带 BOM）
 - [x] 2026-09-01 CLAUDE.md 过时信息审计与更新：逐一核实代码现状后修正 4 处——①大文件守则：study_service.py 已拆至 1687 行/24 顶层函数移出表格，ModuleView.tsx 仍 5910 行/103 useState 保留；②模型调用链路已抽至 model_client.py（re-export 门面），AgentJobWorker 在 agent_runtime.py；③"已知架构债：非流式整包等待"改写为"流式+30s 首 token 超时已完成（5fe4a13），剩 P1 真实上游验收"；④全量测试时长 17s→105s（187 项实测）。仅文档变更，无功能代码改动
 - [x] 2026-08-30 文档整理：《项目架构解析》并入 project.md（以架构解析详细骨架为主干 + 保留域地图为 §8，章节号保持 §3.4/§4.1 不变以保住学习指南锚点）；核实并修正漂移数字（agents/ 16→19 文件、ModuleView useState 108→104、auth 三文件 371→458、modules 域 18→20）；学习指南 7 处引用同步改指 project.md；删除库根原件。docs.md 宪法新增 §6「AI 生成语言规范」（用户执笔专区，AI 只读遵守），框架 v1.1→v1.2
 - [x] 2026-08-29 移除01课前准备问题生成链路（用户决策）：根因是生成合同"2至5个问题"（content_prompts 结构模板 + story 模板 preparation_rules）与强反馈硬校验"最多1个"长期互相矛盾，每次生成必撞线。修复：删"最多1个"强反馈校验与"最多5个"结构校验；prompt 两处不再要求生成问题；新硬校验"01不应包含问题列表"；story 模板 version 5→6 使旧 checkpoint 缓存自动失效；降级模板与 4 处测试同步。前端 questions 渲染保留（旧课数据兼容，新课自然为空）
@@ -137,6 +146,12 @@
 
 | 日期 | 内容 | 结果 |
 |---|---|---|
+| 2026-09-24 | 域目录中文化 + 26 域双文档补全：29 域目录两件套存在性脚本核验（29/29 齐备）；grep 确认活动文档无旧英文目录路径引用 | ✅ 29 域齐备（纯文档变更，验证三件套不适用） |
+| 2026-09-24 | 图标切回 app-icon.png：tsc / build / dev server 5174 用户浏览器实测 | ✅ tsc / ⚠️ Vite 2249 modules 后既有原生 exit（与本轮无关）/ ✅ 图标显示用户确认 |
+| 2026-09-24 | 文档库结构清理 v2.1：mv 迁移 core 9 域 / bugs 11 档案 / course-style-lab，活动文档引用全量修正后 grep 核验 | ✅ core/、bugs/、draft/ 目录消除；活动文档旧路径零残留（纯文档变更，验证三件套不适用） |
+| 2026-09-24 | favicon 修复：Vite dev 5173 实测 `/favicon.svg` 200（image/svg+xml）、Chrome 打开页面后网络面板确认浏览器成功拉取图标；`npx tsc -b` / `npm run build` | ✅ 图标加载正常 / ✅ tsc / ⚠️ Vite 2249 modules 后既有原生 exit 1（与本轮无关） |
+| 2026-09-24 | 启动项目.bat 实测：真实拉起 uvicorn 8000 + Vite 5173，/api/health 与前端均 200，验证后清理测试进程 | ✅ 通过（无 backend/web 代码改动，未跑验证三件套） |
+| 2026-09-24 | 文档库混合升级（无代码改动）：全库引用一致性核验 | ✅ questions.md 互引 5 处正确；旧路径仅日志迁移记录（→archive/ 标注，合规） |
 | 2026-09-01 | CLAUDE.md 审计核验（无代码改动）：全量 pytest / tsc / build | ✅ 187 passed / 105s；✅ tsc；⚠️ Vite 2249 modules 后既有原生 exit 1（与本轮无关） |
 | 2026-08-29 | 自测初稿生成调用补回 + patch artifact 字段分离：全量 pytest | ✅ 187 passed（+2）/ 97s |
 | 2026-08-29 | 移除01课前准备问题生成链路：全量 pytest / tsc / build | ✅ 185 passed / ✅ tsc / ⚠️ Vite 既有原生 exit 1（无关） |

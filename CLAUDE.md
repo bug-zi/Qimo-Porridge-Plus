@@ -2,7 +2,7 @@
 
 > 本文件是项目的最高协作契约。每次会话开始时先读完本文件，再动手。
 > 配套的实时状态看板在 `docs/project/DEV_BOARD.md`——**每次会话结束时必须更新它**。
-> 文档库结构与规则见 `docs/docs.md`（文档框架宪法）：开发文档在 `docs/project/`，
+> 文档库机制正本见 `docs/project/README.md`（权责表 / spec-plan / 归档机制）：开发文档在 `docs/project/`，
 > 学习文档在 `docs/study/`；涉及某域改动前先读该域的 design.md / designs-specs.md（已有时）。
 
 ## 项目定位（一句话）
@@ -19,6 +19,28 @@
 - 企业组织、多租户运营、支付、额度售卖
 
 已有认证/owner 隔离保留不删，但只作为本地数据保护，不向外扩张。
+
+## 文档体系与维护权责
+
+`docs/` 是开发者与 AI 共同维护的文档库（机制正本：`docs/project/README.md`），权责如下：
+
+| 内容 | 维护方 | AI 的角色 |
+|---|---|---|
+| modules/、core/ 各域 `design.md` | 开发者主导 | 可提建议；经审核通过才可修改，不得擅自改写 |
+| modules/、core/ 各域 `designs-specs.md` | **AI 生成并维护** | 基于 design.md 严格生成，是开发的直接依据；开发者仅简单审核 |
+| `docs/project/project.md` | 开发者主导 | 可建议；协助完善需审核通过 |
+| `docs/project/README.md` | **AI** | 机制正本：spec/plan 存放与归档机制、权责表、语言规范 |
+| `docs/log/<YYMMDD>.md` | AI | 每天一个开发日志；小节下首行 `> 创建于 YYYY-MM-DD HH:MM`（date 实取） |
+| `docs/project/DEV_BOARD.md` | AI 职责 | 实时状态真源，每会话结束更新 |
+| `docs/project/全局/archive/`（错误档案） | AI 职责 | 遇错自动建档（`YYYY-MM-DD-<slug>.md`），只进不改；索引见 archive.md |
+| `docs/project/新功能开发区.md` / `优化建议区.md` | 开发者记录 | AI 据此立项/实施；完成后按轮归档 |
+| `docs/project/问题疑惑区.md` | 开发者记录 | **AI 不主动查阅**，指名时才读并答疑 |
+| `docs/project/idea/` 与 `临时草稿（待写入）.md` | 开发者 | AI 不读取不修改（例外：AI 产出的 spec/plan 可存 idea/，只动自己产出的文件） |
+| `docs/project/全局/` | 权责同模块文档 | 系统级/跨模块方案（spec/plan）与 archive/ |
+| `docs/study/` | 见 `docs/study/study.md` | 学习文档库 |
+| Git 操作 | 开发者 | **禁止 AI 自主执行任何 git 操作** |
+
+工作流程：开发者写 design.md → AI 据此生成 designs-specs.md → AI 按 specs 开发；spec/plan 命名与归档四步见 `docs/project/README.md`。
 
 ## 验证三件套（任何代码改动后必跑）
 
@@ -61,7 +83,7 @@ npm run build
 
 - 当用户提出较大的项目更新或修改想法时，AI Agent **不得直接开始实现**。
 - 必须先详细研究当前项目代码、既有架构、调用链、数据契约、测试与相关文档，再结合用户需求和项目实际情况制定可执行方案。
-- 必须先将完整方案编写为独立 Markdown 文档并保存到 `docs/`，内容至少包括：现状分析、需求理解、影响范围、实施步骤、风险与兼容性、测试及验收方式。
+- 必须先将完整方案编写为独立 Markdown 文档并保存到 `docs/`（系统级方案放 `docs/project/全局/`，单域功能走该域 spec/plan，机制见 `docs/project/README.md`），内容至少包括：现状分析、需求理解、影响范围、实施步骤、风险与兼容性、测试及验收方式。
 - 方案文档交由用户审阅；只有在用户明确确认方案无误后，才能按照方案执行代码修改。若用户要求调整方案，应先更新文档并再次等待确认。
 
 ## Git 提交纪律
@@ -82,11 +104,12 @@ npm run build
 
 1. **开始时**：读 `docs/project/DEV_BOARD.md` 了解当前状态 → `git status --short` 看工作区。
 2. **动手前**：确认任务在看板"📋 计划中"或用户明确指示；有冲突先问。
-3. **过程中**：改动超出单个职责时拆分任务记录到看板。
-4. **结束时**：
+3. **问题疑惑区**：`docs/project/问题疑惑区.md` AI 不主动查阅；用户指名时才读并答疑，解答后按轮归档（机制见 `docs/project/README.md`）。
+4. **过程中**：改动超出单个职责时拆分任务记录到看板。
+5. **结束时**：
    - 跑验证三件套（有代码改动时）
    - **更新 `docs/project/DEV_BOARD.md`**：任务状态流转、Bug 区新增/解决、提交记录、验证记录
-   - **写当日开发日志 `docs/project/log/YYYY-MM-DD.md`**（append-only，同日多会话追加；有实质工作时必写）
+   - **写当日开发日志 `docs/log/<YYMMDD>.md`**（append-only，同日多会话追加；有实质工作时必写）
    - 看板与日志随代码一起提交
 
 ## 历史教训（避免重蹈覆辙）

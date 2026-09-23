@@ -1,19 +1,28 @@
-# modules/ 可见功能域总文档
+# modules/ 功能域总文档
 
-本文件夹按**功能域**（前后端纵切）组织用户可见功能，一域一文件夹。
-域地图（每个域对应的代码锚点与文档状态）见 [`../project.md` §3.1](../project.md)。
+本文件夹按**功能域**（前后端纵切）组织项目全部域，一域一文件夹，共 29 域：
+**20 个用户可见功能域** + **9 个引擎与基础设施域**（用户不可见，2026-09-24 自 core/ 并入）。
+**域目录自 2026-09-24 起使用中文名**；括号内英文 kebab-case 标识保留，用于代码锚点、
+错误档案与看板条目的对照（错误档案中的域名为建档当时结构）。
+域地图见 [`../project.md` §8](../project.md)。
 
 每个域文件夹内固定两件套：`design.md`（设计契约，人裁决）+ `designs-specs.md`（事实规格，AI 维护）——
-这是 docs.md §2.4 登记的标准结构，代替单独的文件夹总文档。
+这是 README.md 登记的标准结构，代替单独的文件夹总文档。
 
-**UI 挂载对照**（域 → 界面位置）：
+**UI 挂载对照**（可见功能域 → 界面位置）：
 
-| 界面位置 | 域 |
+| 界面位置 | 域目录 |
 |---|---|
-| 左侧边栏（菜单本体与切换） | sidebar-shell |
-| 顶部导航栏 | topbar |
-| 右侧面板容器 | right-panel |
-| 侧边栏菜单项：总览/规划/复习主线/刷题/模拟卷/错题本/资料库/知识地图/专业名词/归档/设置 | overview / planning / mainline / practice / mock-exam / wrong-book / materials / mind-map / glossary / archive / settings |
-| 学习页内：划词工具条/笔记/课程意见反馈/AI 伴学 | selection / notes / course-feedback / ai-companion |
-| 复习计划（每日进度/时长/调整提案） | review-plan |
-| 登录页 | auth-account |
+| 左侧边栏（菜单本体与切换） | 侧边栏框架（sidebar-shell） |
+| 顶部导航栏 | 顶部栏（topbar） |
+| 右侧面板容器 | 右侧面板框架（right-panel） |
+| 侧边栏菜单项：总览/规划/复习主线/刷题/模拟卷/错题本/资料库/知识地图/专业名词/归档/设置 | 总览 / 规划 / 复习主线 / 刷题 / 模拟卷 / 错题本 / 资料库 / 知识地图 / 专业名词 / 归档 / 设置 |
+| 学习页内：划词工具条/笔记/课程意见反馈/AI 伴学 | 划词基础 / 笔记 / 课程意见反馈 / AI伴学 |
+| 复习计划（每日进度/时长/调整提案） | 复习计划（review-plan） |
+| 登录页 | 账户与登录（auth-account） |
+
+**引擎域**（原 core/ 9 域）：模型调用（model-client）、后台队列（job-queue）、
+课程生成流水线（content-pipeline）、RAG检索（knowledge-rag）、资料解析（material-parser）、
+复习调度器（scheduler）、存储与工作区（storage）、认证与隔离（auth-isolation）、外部MCP（external-mcp）。
+可见功能域都会向下依赖若干引擎域（几乎所有 AI 功能依赖模型调用，所有长任务依赖后台队列）；
+跨域调用关系优先看各域 designs-specs.md 的"上游调用方/下游消费方"小节。

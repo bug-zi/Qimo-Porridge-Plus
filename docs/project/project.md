@@ -1,7 +1,7 @@
 # project/ 开发文档库总文档
 
-> 本文档是开发库的导航中枢：**全局架构参考 + 域地图**。各域细节在 `modules/` 与 `core/`
-> 的 design.md / designs-specs.md 中；文档库规则见 `../docs.md`。
+> 本文档是开发库的导航中枢：**全局架构参考 + 域地图**。各域细节在 `modules/`
+> 各域的 design.md / designs-specs.md 中；文档库规则见 `README.md`（机制正本）。
 > 锚定 2026-08-30 代码快照（v2.1.0 开发中，学习/冻结期）。行号会随开发漂移，以函数名为准。
 > 2026-08-30 由《项目架构解析》（2026-08-29）与原 project.md 合并而成，原件已删（git 可溯源）。
 
@@ -202,49 +202,51 @@ workspace 有 revision 与文件锁（workspace.py），写入走"读-改-写"�
 | 并发 | SQLite WAL + timeout=30；workspace 文件锁；队列单线程 + 同课程互斥 | deps / workspace / agent_runtime |
 | 验证 | 后端 187 测试（含门面契约测试锁 re-export）；前端 tsc + vitest + build | CLAUDE.md 验证三件套 |
 
-## 8. 域地图（modules/ + core/ 与代码的对应）
+## 8. 域地图（modules/ 与代码的对应）
 
-### 8.1 modules/（可见功能域，前后端纵切）
+### 8.1 可见功能域（前后端纵切）
 
-| 域文件夹 | 中文 | 核心代码锚点 | 文档状态 |
+> 域目录自 2026-09-24 起使用中文名；英文标识保留，用于代码锚点、错误档案与看板条目对照。
+
+| 域目录 | 英文标识 | 核心代码锚点 | 文档状态 |
 |---|---|---|---|
-| sidebar-shell | 侧边栏框架 | `web/src/components/Sidebar.tsx` | ⏳ 占位 |
-| topbar | 顶部栏 | `TopbarCourseTimer.tsx` + `hooks/useCourseTimer.tsx` | ⏳ 占位 |
-| right-panel | 右侧面板框架 | `NotesSidebarPanel.tsx` 等面板容器 | ⏳ 占位 |
-| overview | 总览 | App.tsx 工作台区 + review_plan 数据 | ⏳ 占位 |
-| planning | 规划 | `PlanningView.tsx` + `strategy.py` + `agents/strategy_workflow.py` | ⏳ 占位 |
-| mainline | 复习主线 | `ModuleView.tsx` + `content_workflow.py` 落点 | ⏳ 占位 |
-| practice | 刷题 | `practice.py` submit_practice_answer 一族 | 🌱 样板 |
-| mock-exam | 模拟卷 | `practice.py` submit_mock_answers/repair | ⏳ 占位 |
-| wrong-book | 错题本 | `practice.py` 错题部分 + routers/courses 归档 | ⏳ 占位 |
-| materials | 资料库 | `materials.py` + `routers/materials.py` | ⏳ 占位 |
-| mind-map | 知识地图 | `CourseMindMapView.tsx` + workspace mind_map | ⏳ 占位 |
-| glossary | 专业名词 | `agents/glossary.py` + `useGlossary` + GlossaryTermSpan | ⏳ 占位 |
-| review-plan | 复习计划 | `review_plan.py` + `study_scheduler.py` 调用方 | ⏳ 占位 |
-| selection | 划词基础 | `useTextSelection.ts` + `SelectionToNoteToolbar.tsx` | ⏳ 占位 |
-| notes | 笔记 | `utils/noteHighlights.ts` + `NoteHighlightDismiss.tsx` | ⏳ 占位 |
-| course-feedback | 课程意见反馈 | `course_feedback_service.py`(1204行) + `course_feedback_store.py` + CourseFeedbackPreview | ⏳ 占位 |
-| ai-companion | AI 伴学 | `AiCompanion.tsx` + `agent_chat.py`(SSE) | ⏳ 占位 |
-| archive | 归档 | archived_items 表 + `deps.py` 归档辅助 | ⏳ 占位 |
-| auth-account | 账户与登录 | `LoginPage.tsx` + `auth_service.py` | ⏳ 占位 |
-| settings | 设置 | `routers/settings.py` + `SettingsView.tsx` + `model_profiles.py` | 🌱 样板 |
+| 侧边栏框架 | sidebar-shell | `web/src/components/Sidebar.tsx` | 🌱 AI 起草稿待审定 |
+| 顶部栏 | topbar | `TopbarCourseTimer.tsx` + `hooks/useCourseTimer.tsx` | 🌱 AI 起草稿待审定 |
+| 右侧面板框架 | right-panel | `NotesSidebarPanel.tsx` 等面板容器 | 🌱 AI 起草稿待审定 |
+| 总览 | overview | App.tsx 工作台区 + review_plan 数据 | 🌱 AI 起草稿待审定 |
+| 规划 | planning | `PlanningView.tsx` + `strategy.py` + `agents/strategy_workflow.py` | 🌱 AI 起草稿待审定 |
+| 复习主线 | mainline | `ModuleView.tsx` + `content_workflow.py` 落点 | 🌱 AI 起草稿待审定 |
+| 刷题 | practice | `practice.py` submit_practice_answer 一族 | 🌱 样板 |
+| 模拟卷 | mock-exam | `practice.py` submit_mock_answers/repair | 🌱 AI 起草稿待审定 |
+| 错题本 | wrong-book | `practice.py` 错题部分 + routers/courses 归档 | 🌱 AI 起草稿待审定 |
+| 资料库 | materials | `materials.py` + `routers/materials.py` | 🌱 AI 起草稿待审定 |
+| 知识地图 | mind-map | `CourseMindMapView.tsx` + workspace mind_map | 🌱 AI 起草稿待审定 |
+| 专业名词 | glossary | `agents/glossary.py` + `useGlossary` + GlossaryTermSpan | 🌱 AI 起草稿待审定 |
+| 复习计划 | review-plan | `review_plan.py` + `study_scheduler.py` 调用方 | 🌱 AI 起草稿待审定 |
+| 划词基础 | selection | `useTextSelection.ts` + `SelectionToNoteToolbar.tsx` | 🌱 AI 起草稿待审定 |
+| 笔记 | notes | `utils/noteHighlights.ts` + `NoteHighlightDismiss.tsx` | 🌱 AI 起草稿待审定 |
+| 课程意见反馈 | course-feedback | `course_feedback_service.py`(1204行) + `course_feedback_store.py` + CourseFeedbackPreview | 🌱 AI 起草稿待审定 |
+| AI伴学 | ai-companion | `AiCompanion.tsx` + `agent_chat.py`(SSE) | 🌱 AI 起草稿待审定 |
+| 归档 | archive | archived_items 表 + `deps.py` 归档辅助 | 🌱 AI 起草稿待审定 |
+| 账户与登录 | auth-account | `LoginPage.tsx` + `auth_service.py` | 🌱 AI 起草稿待审定 |
+| 设置 | settings | `routers/settings.py` + `SettingsView.tsx` + `model_profiles.py` | 🌱 样板 |
 
-### 8.2 core/（引擎与基础设施，用户不可见）
+### 8.2 引擎与基础设施域（用户不可见，原 core/，2026-09-24 并入 modules/）
 
-| 域文件夹 | 中文 | 核心代码锚点 | 文档状态 |
+| 域目录 | 英文标识 | 核心代码锚点 | 文档状态 |
 |---|---|---|---|
-| model-client | 模型调用 | `model_client.py`(770行) + `model_usage.py` | 🌱 样板 |
-| job-queue | 后台队列 | `agent_runtime.py`(1104行) AgentJobWorker + lease fencing | ⏳ 占位 |
-| content-pipeline | 课程生成流水线 | `agents/content_workflow.py` + lesson/question/validation/patches | ⏳ 占位 |
-| knowledge-rag | RAG 检索 | `knowledge_service.py`(1402行) retrieve_material_context | ⏳ 占位 |
-| material-parser | 资料解析 | `material_parser.py`（MarkItDown→Docling→RapidOCR→视觉兜底） | ⏳ 占位 |
-| scheduler | 复习调度器 | `study_scheduler.py`(740行，纯函数 DAG) | ⏳ 占位 |
-| storage | 存储与工作区 | `workspace.py` + `paths.py` + SQLite 表 + 双存储分工 | ⏳ 占位 |
-| auth-isolation | 认证与隔离 | `auth_middleware.py` + `tenancy.py` + deps.require_course_ownership | ⏳ 占位 |
-| external-mcp | 外部 MCP | `mcp_gateway.py` + `external_source_service.py` | ⏳ 占位 |
+| 模型调用 | model-client | `model_client.py`(770行) + `model_usage.py` | 🌱 样板 |
+| 后台队列 | job-queue | `agent_runtime.py`(1104行) AgentJobWorker + lease fencing | 🌱 AI 起草稿待审定 |
+| 课程生成流水线 | content-pipeline | `agents/content_workflow.py` + lesson/question/validation/patches | 🌱 AI 起草稿待审定 |
+| RAG检索 | knowledge-rag | `knowledge_service.py`(1402行) retrieve_material_context | 🌱 AI 起草稿待审定 |
+| 资料解析 | material-parser | `material_parser.py`（MarkItDown→Docling→RapidOCR→视觉兜底） | 🌱 AI 起草稿待审定 |
+| 复习调度器 | scheduler | `study_scheduler.py`(740行，纯函数 DAG) | 🌱 AI 起草稿待审定 |
+| 存储与工作区 | storage | `workspace.py` + `paths.py` + SQLite 表 + 双存储分工 | 🌱 AI 起草稿待审定 |
+| 认证与隔离 | auth-isolation | `auth_middleware.py` + `tenancy.py` + deps.require_course_ownership | 🌱 AI 起草稿待审定 |
+| 外部MCP | external-mcp | `mcp_gateway.py` + `external_source_service.py` | 🌱 AI 起草稿待审定 |
 
-> 文档状态：⏳ 占位（design.md 仅一句话定位）→ 🌱 样板/进行中 → ✅ 已审定。
-> 生长节奏：随学习阶段（见 ../study/guide/）逐域补全，不批量 AI 起草。
+> 文档状态：🌱 AI 起草稿待审定（2026-09-24 从代码逆向补全，待人审定）→ 🌱 样板 → ✅ 已审定。
+> 生长节奏：随学习阶段（见 ../study/guide/）逐域深化审定，不批量 AI 起草新内容。
 
 ## 9. 已知复杂度热点与债务（2026-08 看板口径）
 
@@ -252,12 +254,12 @@ workspace 有 revision 与文件锁（workspace.py），写入走"读-改-写"�
 - `study_service.py` 剩余 1553 行待继续拆（门面模式不变）
 - `agent_runtime.py` 是"队列+存储+杂项"混合体，职责待分离
 - Windows 下 Vite/Rolldown 生产构建原生 exit 1（tsc 正常）；uvicorn --reload 在中文路径失效
-- 课程生成单节约 7~9 分钟，效率优化方案待确认（`proposals/课程生成效率优化方案.md`）
+- 课程生成单节约 7~9 分钟，效率优化方案待确认（`全局/课程生成效率优化方案.md`）
 
 ## 10. 文档索引与本库导航
 
 - 根 `CLAUDE.md`：协作契约（禁区/验证三件套/提交纪律/数据安全）——最高优先级
-- `../docs.md`：文档库宪法（结构/生命周期/权限/AI 生成语言规范）
-- `DEV_BOARD.md`：实时看板（状态真源，会话结束时刷新）｜ 日志：`log/` ｜ 灵感：`ideas/` ｜ 提案：`proposals/`
+- `README.md`：文档库机制正本（结构/归档/权责/AI 生成语言规范）
+- `DEV_BOARD.md`：实时看板（状态真源，会话结束时刷新）｜ 日志：`log/` ｜ 三区：新功能开发区 / 优化建议区 / 问题疑惑区 ｜ 方案：`全局/` ｜ idea 暂存：`idea/`
 - `../study/guide/项目学习指南.md`：学习路线（本文的"怎么读"版本）
-- `draft/course-style-lab/`：课程风格实验场与决策记录
+- `全局/archive/course-style-lab/`：课程风格实验场与决策记录（2026-09-24 自 draft/ 并入归档区）

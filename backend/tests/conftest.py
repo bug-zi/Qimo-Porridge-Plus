@@ -5,7 +5,7 @@ backend/data/ 是用户的真实学习数据（见项目 CLAUDE.md「数据安�
 个别测试（test_ocr_service / test_embedding_pdf_regressions）会经
 _extract_material_content → _save_cached_parse 真实落盘，历史上每次
 全量测试都在真实缓存目录净增垃圾文件（2026-08-27~09-01 累计 157 个，
-见 docs/project/log/2026-09-01.md）。
+见 docs/log/260901.md）。
 
 本夹具 autouse 生效：把缓存目录重定向到每个测试各自的 tmp_path，
 测试写缓存在临时目录内自生自灭，不触碰真实数据。新增测试无需再
