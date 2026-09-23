@@ -1,0 +1,12 @@
+﻿# patch path 斜杠格式被拒 + partial 被掩盖为"生成完成"
+- 档案号：2026-08-29-patch-path-format
+- 发现时间：2026-08-29（生成下一课 10 分钟后复现）
+- 严重度：高
+- 所属域：core/content-pipeline、modules/mainline
+- 发现场景：真实生成下一课，job completed 但目标课无 studyGuide
+- 错误现象：①模型按 JSON Pointer 习惯返回 patch path `/sections/0/questions`，content_patches._segments 只认点号格式直接拒绝 ②generationHeadline 只看 job.status==='completed'，掩盖 result.partial=true 的部分失败
+- 导致后果：用户以为生成完成，实际课程缺失；patch 修复链路全废
+- 根因：①路径解析不兼容 ②PATCH prompt 未约定 path 格式 ③前端 headline 未读 partial 字段
+- 建议修复方式：路径归一化兼容斜杠+纯数字字段转下标；两个 PATCH prompt 明确格式与示例；headline 读取 job.result.partial 如实提示
+- 状态：🟡 已修（+2 回归测试），待用户重启后端真实重生成验证
+- 关联：看板 2026-08-29 条目；content_patches.py

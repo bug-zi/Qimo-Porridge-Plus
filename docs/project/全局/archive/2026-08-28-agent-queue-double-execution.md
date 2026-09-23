@@ -1,0 +1,12 @@
+﻿# agent 队列双重执行（心跳猝死→lease 过期→二次 claim）
+- 档案号：2026-08-28-agent-queue-double-execution
+- 发现时间：2026-08-28（approve attempt 1→2 双执行现场实锤，job-0d929645）
+- 严重度：高
+- 所属域：core/job-queue
+- 发现场景：真实课程生成监控
+- 错误现象：同一课程双份生成并发运行
+- 导致后果：重复模型调用（费用/时间翻倍）、workspace 写竞争、数据不一致风险
+- 根因：心跳线程在 SQLite 锁竞争时无保护猝死 → lease 过期 → job 被二次 claim
+- 建议修复方式：心跳 try/except 保护 + lease_token 代际 fencing（旧代完成/失败/续租全被拒）+ 同课程 running 互斥（NOT EXISTS 子查询）+ 协作取消点
+- 状态：✅ 已关闭（132e3e1，138 passed）
+- 关联：看板；job-queue 域；分布式租约 fencing 概念（patterns 候选）

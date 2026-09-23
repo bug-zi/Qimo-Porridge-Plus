@@ -1,0 +1,12 @@
+﻿# 无自测检查点时空初稿走 patch，考点覆盖校验循环失败
+- 档案号：2026-08-29-missing-question-draft-patch
+- 发现时间：2026-08-29（task-d3-03"调度概念"课生成）
+- 严重度：高
+- 所属域：core/content-pipeline
+- 发现场景：真实生成课程，讲义成功但自测环节失败
+- 错误现象：前端永远显示"内容生成中"，面板只显示 2 次模型调用
+- 导致后果：该课自测内容缺失，用户无感知卡死
+- 根因：定向微调重构把 generate_questions() 首次调用删丢；patch 的 add_question 不带 examPointIds，而考点覆盖校验只认该字段，循环失败
+- 建议修复方式：补回初稿生成调用；恢复初稿一次通过时的 checkpoint 落盘；patch artifact 输入/剩余问题分离；patch Prompt 明确要求 add_question 携带 examPointIds
+- 状态：🟡 已修（+2 回归测试 test_lesson_question_draft.py），待用户重启后端真实重生成验证
+- 关联：看板 2026-08-29 条目；proposals/archive/课程初稿定向微调修复实施方案.md
