@@ -1,3 +1,5 @@
+#分块和保存逻辑
+
 from __future__ import annotations
 
 import hashlib

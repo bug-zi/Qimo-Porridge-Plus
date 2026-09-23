@@ -1,0 +1,12 @@
+﻿# Vite/Rolldown Windows 生产构建原生退出 0xC0000409
+- 档案号：2026-08-28-vite-rolldown-native-exit
+- 发现时间：2026-08-28（前端 build 验证时）
+- 严重度：中
+- 所属域：构建链（无直接业务域）
+- 发现场景：npm run build，tsc 独立通过
+- 错误现象：转换 2249~2265 modules 后原生退出 0xC0000409，无 JS 堆栈
+- 导致后果：生产构建不可用，只能依赖 dev 模式；验证三件套的 build 项长期带 ⚠️
+- 根因：待查（Windows 下 Rolldown 原生崩溃）
+- 建议修复方式：独立定位（升/降 Vite 与 Rolldown 版本、最小复现、换 rollup 通道对比）
+- 状态：🔴 待定位（与具体功能改动无关，长期存在）
+- 关联：看板 🐛 区

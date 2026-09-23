@@ -1,3 +1,5 @@
+de
+
 # 期末粥++ (Exam Porridge Booster · Campus)
 
 > **多用户校园版**。基于个人版 [Qimo-Porridge](https://github.com/bug-zi/Qimo-Porridge)（冻结于 `v1.0.0-personal`）演进而来。
@@ -82,7 +84,7 @@ pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
 ```
 
-前端：
+co前端：
 
 ```bash
 cd web
